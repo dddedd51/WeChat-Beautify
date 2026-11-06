@@ -188,7 +188,7 @@ internal static class Engine {
         }
     }
     internal static string Diagnosis(TargetInfo t){
-        var b=new StringBuilder("微信美化 0.6 / version family adapters\n");
+        var b=new StringBuilder("微信美化 0.7.0-preview.1 / version family adapters\n");
         b.AppendLine("UTC="+DateTime.UtcNow.ToString("o")).AppendLine("Version="+t?.Version).AppendLine("DllVersion="+t?.DllVersion).AppendLine("Machine="+t?.Machine.ToString("x")).AppendLine("SHA256="+t?.Hash).AppendLine("Adapter="+t?.Adapter?.Id).AppendLine("TestedBuild="+(t?.Adapter?.IsTestedBuild(t.Version,t.Hash)??false)).AppendLine("DetectionError="+t?.Error).AppendLine("Connection="+Connection());
         b.Append(ProcessDiscovery.Diagnostic());
         b.Append(LaunchContext.Diagnostic());

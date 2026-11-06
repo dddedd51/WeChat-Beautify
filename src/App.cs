@@ -33,6 +33,7 @@ internal sealed class Controller {
     GlassSettings settings;TargetInfo target;bool busy,initialized;string manual;
     DispatcherTimer previewTimer=new DispatcherTimer();int previewGeneration;bool previewRunning,previewPending;
     int recommendedShade=-1;readonly PalettePreview palettePreview=new PalettePreview();
+    readonly ShadeUndo shadeUndo=new ShadeUndo();string draftPath,draftName;bool syncingZoom;
     T Find<T>(string name)where T:class{return Window.FindName(name)as T;}
     internal static Window LoadWindow(){using(var s=Assembly.GetExecutingAssembly().GetManifestResourceStream("MainWindow.xaml"))return (Window)XamlReader.Load(s);}
     internal Controller(){
@@ -40,19 +41,25 @@ internal sealed class Controller {
         PopulateCompatibility(Window);
         if(!File.Exists(Path.Combine(Files.Data,"settings.ini"))){ThemePresets.Mint(settings);settings.Save();}
         foreach(string page in new[]{"Theme","Background","Colors","Guide"}){string name=page;Find<RadioButton>("Nav"+name).Checked+=(s,e)=>ShowPage(name);}
-        Find<Button>("Mint").Click+=async(s,e)=>await Work(async()=>{var next=Read();await Task.Run(()=>ThemePresets.Mint(next));settings=next;Find<CheckBox>("Dark").IsChecked=false;Find<Slider>("ImageBlur").Value=settings.Blur;Find<Slider>("ImageShade").Value=settings.Shade;settings.Save();Preview();SetStatus("青屿主题已准备好。点击「更新主题」应用到微信。",false);});
+        Find<Button>("Mint").Click+=async(s,e)=>await Work(async()=>{ClearShadeUndo();var next=Read();await Task.Run(()=>ThemePresets.Mint(next));settings=next;Find<CheckBox>("Dark").IsChecked=false;Find<Slider>("ImageBlur").Value=settings.Blur;Find<Slider>("ImageShade").Value=settings.Shade;settings.Save();Preview();SetStatus("青屿主题已准备好。点击「更新主题」应用到微信。",false);});
         Find<Border>("Preview").Child=palettePreview;palettePreview.Cursor=System.Windows.Input.Cursors.Hand;palettePreview.Pick+=OpenColors;Find<Button>("EditColors").Click+=(s,e)=>OpenColors(null);
         Find<Slider>("Density").Value=settings.Density;Find<CheckBox>("Dark").IsChecked=settings.Dark;
         Find<Slider>("ImageBlur").Value=settings.Blur;Find<Slider>("ImageShade").Value=settings.Shade;
         previewTimer.Interval=TimeSpan.FromMilliseconds(250);previewTimer.Tick+=async(s,e)=>{previewTimer.Stop();await RenderWallpaper();};
-        Find<Slider>("ImageBlur").ValueChanged+=(s,e)=>Preview();Find<Slider>("ImageShade").ValueChanged+=(s,e)=>Preview();
+        Find<Slider>("ImageBlur").ValueChanged+=(s,e)=>Preview();Find<Slider>("ImageShade").ValueChanged+=(s,e)=>{shadeUndo.Observe((int)e.NewValue);ShowShadeUndo();Preview();};
         Find<Button>("ChooseImage").Click+=async(s,e)=>{
             var d=new OpenFileDialog{Title="选择微信背景图片",Filter="图片|*.png;*.jpg;*.jpeg;*.bmp",CheckFileExists=true};
-            if(d.ShowDialog(Window)==true)await Work(async()=>{string path=await Task.Run(()=>Wallpaper.Import(d.FileName));var crop=new CropWindow(Window,path,new Rect(0,0,1,1),PreviewRatio());if(crop.ShowDialog()!=true)return;settings.Wallpaper=path;settings.WallpaperName=Path.GetFileName(d.FileName);settings.SetCrop(crop.Result);Read().Save();Preview();SetStatus("背景和裁剪已保存。点击「更新主题」应用到已连接的微信。",false);});
+            if(d.ShowDialog(Window)==true)await Work(async()=>{string path=await Task.Run(()=>Wallpaper.Import(d.FileName));BeginComposition(path,Path.GetFileName(d.FileName),new Rect(0,0,1,1));});
         };
-        Find<Button>("CropImage").Click+=(s,e)=>{try{var crop=new CropWindow(Window,settings.Wallpaper,settings.Crop,PreviewRatio());if(crop.ShowDialog()==true){settings.SetCrop(crop.Result);Read().Save();Preview();SetStatus("裁剪已保存。点击「更新主题」应用到微信。",false);}}catch(Exception ex){SetStatus(ex.Message,true);}};
-        Find<Button>("ImproveContrast").Click+=(s,e)=>{if(recommendedShade>=0){Find<Slider>("ImageShade").Value=recommendedShade;Read().Save();}};
-        Find<Button>("ClearImage").Click+=(s,e)=>{settings.Wallpaper="";settings.WallpaperName="";Read().Save();Preview();SetStatus("已切换为分区纯色。点击「更新主题」应用。",false);};
+        Find<Button>("CropImage").Click+=(s,e)=>{try{BeginComposition(settings.Wallpaper,settings.WallpaperName,settings.Crop);}catch(Exception ex){SetStatus(ex.Message,true);}};
+        Find<Button>("SaveComposition").Click+=(s,e)=>FinishComposition(true);
+        Find<Button>("CancelComposition").Click+=(s,e)=>FinishComposition(false);
+        Find<Button>("ResetComposition").Click+=(s,e)=>palettePreview.ResetComposition();
+        Find<Slider>("CompositionZoom").ValueChanged+=(s,e)=>{if(!syncingZoom)palettePreview.ZoomComposition(e.NewValue);};
+        palettePreview.CompositionChanged+=SyncComposition;
+        Find<Button>("ImproveContrast").Click+=(s,e)=>{if(recommendedShade>=0){shadeUndo.Capture((int)Find<Slider>("ImageShade").Value,recommendedShade);Find<Slider>("ImageShade").Value=recommendedShade;ShowShadeUndo();Read().Save();}};
+        Find<Button>("UndoContrast").Click+=(s,e)=>{if(shadeUndo.Take(out int before)){Find<Slider>("ImageShade").Value=before;Read().Save();ShowShadeUndo();SetStatus("已撤销建议遮罩。点击「更新主题」应用到微信。",false);}};
+        Find<Button>("ClearImage").Click+=(s,e)=>{ClearShadeUndo();settings.Wallpaper="";settings.WallpaperName="";Read().Save();Preview();SetStatus("已切换为分区纯色。点击「更新主题」应用。",false);};
         Find<Slider>("Density").ValueChanged+=(s,e)=>Preview();Find<CheckBox>("Dark").Checked+=(s,e)=>Preview();Find<CheckBox>("Dark").Unchecked+=(s,e)=>Preview();
         Find<Button>("Blue").Click+=(s,e)=>Accent("#78AAE0","雾蓝");Find<Button>("Green").Click+=(s,e)=>Accent("#65B5A1","青玉");Find<Button>("Purple").Click+=(s,e)=>Accent("#A094D9","鸢尾");
         Find<Button>("Detect").Click+=async(s,e)=>await Detect();
@@ -61,22 +68,43 @@ internal sealed class Controller {
         Find<Button>("Apply").Click+=async(s,e)=>await Work(async()=>SetStatus(await Engine.Update(Read(),true),false));
         Find<Button>("Restore").Click+=async(s,e)=>await Work(async()=>SetStatus(await Engine.Update(Read(),false),false));
         Find<Button>("Report").Click+=(s,e)=>{var d=new SaveFileDialog{FileName="微信美化诊断.txt",Filter="文本|*.txt"};if(d.ShowDialog(Window)==true){File.WriteAllText(d.FileName,Engine.Diagnosis(target),Encoding.UTF8);SetStatus("诊断已导出，不包含聊天内容；包含本机路径。",false);}};
+        Find<Button>("CheckUpdates").Click+=(s,e)=>OpenLink("https://github.com/dddedd51/WeChat-Beautify/releases");
+        Find<Button>("OpenGitHub").Click+=(s,e)=>OpenLink("https://github.com/dddedd51/WeChat-Beautify");
+        Find<Button>("OpenBilibili").Click+=(s,e)=>OpenLink("https://www.bilibili.com/video/BV1ag4i6xEco");
         Window.Loaded+=async(s,e)=>{initialized=true;Preview();await Detect();};
         Window.Closing+=(s,e)=>{if(busy){e.Cancel=true;SetStatus("请等待当前操作完成后关闭。",false);return;}previewTimer.Stop();previewGeneration++;initialized=false;try{Read().Save();}catch{}};
     }
     void ShowPage(string page){
+        if(palettePreview.Editing&&page!="Background")FinishComposition(false);
+        Find<ScrollViewer>("SettingsScroll").VerticalScrollBarVisibility=page=="Theme"?ScrollBarVisibility.Disabled:ScrollBarVisibility.Auto;
+        Find<ScrollViewer>("SettingsScroll").ScrollToTop();
         Find<Grid>("Studio").Visibility=page=="Guide"?Visibility.Collapsed:Visibility.Visible;
         Find<Border>("GuidePage").Visibility=page=="Guide"?Visibility.Visible:Visibility.Collapsed;
         foreach(string p in new[]{"Theme","Background","Colors"})Find<StackPanel>(p+"Page").Visibility=page==p?Visibility.Visible:Visibility.Collapsed;
         Find<TextBlock>("PageTitle").Text=page=="Background"?"把喜欢的风景，放进对话":page=="Colors"?"每一处，都有自己的颜色":page=="Guide"?"从这里开始，轻松换装":"给微信一点自己的颜色";
     }
-    double PreviewRatio(){return 760d/400;}
+    void OpenLink(string url){try{System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url){UseShellExecute=true});SetStatus("已在浏览器打开。当前客户端：0.7.0-preview.1；请在 Releases 核对最新版本。",false);}catch(Exception e){SetStatus("无法打开浏览器："+e.Message,true);}}
+    void ShowShadeUndo(){Find<Button>("UndoContrast").Visibility=shadeUndo.Available?Visibility.Visible:Visibility.Collapsed;}
+    void ClearShadeUndo(){shadeUndo.Clear();ShowShadeUndo();}
+    void BeginComposition(string path,string name,Rect crop){
+        var image=new BitmapImage();image.BeginInit();image.CacheOption=BitmapCacheOption.OnLoad;image.UriSource=new Uri(path);image.EndInit();image.Freeze();
+        draftPath=path;draftName=name;palettePreview.BeginComposition(image,crop);previewGeneration++;previewTimer.Stop();
+        Find<Border>("CompositionTools").Visibility=Visibility.Visible;Find<TextBlock>("PreviewHelp").Text="拖动图片 · 滚轮缩放 · 分区虚线仅为构图参考";
+        Find<TextBlock>("ContrastSummary").Text="构图草稿 · 尚未保存";Find<TextBlock>("ContrastDetails").Text="构图时显示清晰原图；保存后恢复模糊、遮罩与可读性检查。示意比例为 19:10，实际微信窗口大小与分栏宽度会影响最终位置。";
+        Toggle(!busy);SyncComposition();SetStatus("在右侧拖动、缩放图片，确认后点「保存构图」。取消或切换页面会保留原背景。",false);
+    }
+    void SyncComposition(){if(!palettePreview.Editing)return;syncingZoom=true;Find<Slider>("CompositionZoom").Value=palettePreview.Composition.Zoom;Find<TextBlock>("CompositionScale").Text=palettePreview.Composition.Zoom.ToString("0.00")+"×";syncingZoom=false;}
+    void FinishComposition(bool save){
+        if(!palettePreview.Editing)return;
+        if(save){settings.Wallpaper=draftPath;settings.WallpaperName=draftName;settings.SetCrop(palettePreview.Composition.Crop);Read().Save();ClearShadeUndo();}
+        palettePreview.EndComposition();draftPath=draftName=null;Find<Border>("CompositionTools").Visibility=Visibility.Collapsed;Find<TextBlock>("PreviewHelp").Text="点击预览区域可编辑配色 · 窗口比例以实际微信为准";Toggle(!busy);Preview();SetStatus(save?"构图已保存。点击「更新主题」应用到微信。":"已取消构图，保留原背景。",false);
+    }
     GlassSettings Read(){return new GlassSettings{Density=(int)Find<Slider>("Density").Value,Dark=Find<CheckBox>("Dark").IsChecked==true,Accent=settings.Accent,Exe=manual??"",Wallpaper=settings.Wallpaper,WallpaperName=settings.WallpaperName,Blur=(int)Find<Slider>("ImageBlur").Value,Shade=(int)Find<Slider>("ImageShade").Value,CropX=settings.CropX,CropY=settings.CropY,CropW=settings.CropW,CropH=settings.CropH,Colors=settings.Colors.Copy()};}
     void OpenColors(string key){if(busy)return;if(key!=null&&!ThemeColors.Supports(key)){SetStatus("此处暂保留微信原生样式；可调整背景、列表与选中项颜色。",false);return;}var editor=new ColorsWindow(Window,Read(),previewBitmap,key);if(editor.ShowDialog()==true){settings.Colors=editor.Result;Read().Save();Preview();SetStatus("分区配色已保存。点击「更新主题」应用到微信。",false);}}
     BitmapSource previewBitmap;
     void Accent(string color,string name){settings.Accent=color;settings.Colors.Set(Read().Dark,"selection",color);settings.Colors.Set(Read().Dark,"selectedText",Readability.SelectionInk(color));Find<TextBlock>("AccentLabel").Text="当前："+name;Preview();}
     void Preview(){
-        if(!initialized)return;var s=Read();Find<TextBlock>("DensityLabel").Text=s.Density+"%";
+        if(!initialized||palettePreview.Editing)return;var s=Read();Find<TextBlock>("DensityLabel").Text=s.Density+"%";
         bool hasImage=!String.IsNullOrEmpty(s.Wallpaper);Find<TextBlock>("BlurLabel").Text=s.Blur.ToString();Find<TextBlock>("ShadeLabel").Text=s.Shade+"%";
         Find<TextBlock>("ImageName").Text=hasImage?(s.WallpaperName.Length>0?s.WallpaperName:"已保存的背景图"):"分区纯色模式";
         Find<TextBlock>("ImageName").ToolTip=Find<TextBlock>("ImageName").Text;Find<StackPanel>("ImageEffects").IsEnabled=hasImage;Find<Slider>("Density").IsEnabled=!hasImage;
@@ -90,7 +118,7 @@ internal sealed class Controller {
         previewGeneration++;previewTimer.Stop();if(hasImage){Find<TextBlock>("ContrastSummary").Text="正在检查文字对比…";previewTimer.Start();}else{previewBitmap=null;palettePreview.Update(Read(),null);ShowContrast(Readability.Analyze(s));}
     }
     async Task RenderWallpaper(){
-        if(previewRunning){previewPending=true;return;}previewRunning=true;int generation=previewGeneration;var state=Read();
+        if(palettePreview.Editing)return;if(previewRunning){previewPending=true;return;}previewRunning=true;int generation=previewGeneration;var state=Read();
         try{var result=await Task.Run(()=>Tuple.Create(Wallpaper.Process(state),Readability.Analyze(state)));string file=result.Item1;if(generation!=previewGeneration||!initialized||String.IsNullOrEmpty(file))return;
             var image=new BitmapImage();image.BeginInit();image.CacheOption=BitmapCacheOption.OnLoad;image.UriSource=new Uri(file);image.EndInit();image.Freeze();previewBitmap=image;palettePreview.Update(state,image);
             ShowContrast(result.Item2);
@@ -99,7 +127,8 @@ internal sealed class Controller {
     }
     void ShowContrast(ContrastReport report){recommendedShade=report.RecommendedShade;Find<TextBlock>("ContrastSummary").Text=report.Summary;Find<TextBlock>("ContrastDetails").Text=report.Details;Find<TextBlock>("ContrastSummary").Foreground=(Brush)new BrushConverter().ConvertFromString(report.Pass?"#217D5C":"#936526");Find<Button>("ImproveContrast").IsEnabled=recommendedShade>=0&&!busy;}
     internal static void PopulateCompatibility(Window window){
-        ((TextBlock)window.FindName("CompatibilitySummary")).Text=Adapters.Summary;
+        ((TextBlock)window.FindName("CompatibilitySummary")).Text="4.1.15.X / 4.2.0.X · x64\n实测范围与风险见「使用指南」";
+        ((TextBlock)window.FindName("CompatibilitySummary")).ToolTip=Adapters.Summary;
         ((TextBlock)window.FindName("CompatibilityGuide")).Text=Adapters.Summary+"\n\nX 表示同系列最后一段版本号。仅标注的完整版本和文件在本机实测过；其他小版本允许尝试，可能显示错误或崩溃。启动时会检查关键绘制结构，通过检查不代表已实测。\n显示异常先点「恢复默认」；若无法正常操作，从托盘完全退出，再用原微信入口启动。新系列需要独立适配。";
     }
     async Task Detect(){await Work(async()=>{
@@ -112,7 +141,7 @@ internal sealed class Controller {
         }else{Find<TextBlock>("Detection").Text="微信 "+(target.Version??"未找到")+"\n暂不可启用主题";SetStatus(target.Error,true);}
     });}
     async Task Work(Func<Task> action){if(busy)return;busy=true;Toggle(false);SetStatus("正在处理，请稍候…",false);try{await action();}catch(Exception e){SetStatus(e.Message,true);}finally{busy=false;Toggle(true);}Find<TextBlock>("Connection").Text=await Task.Run(()=>Engine.Connection());}
-    void Toggle(bool enabled){foreach(string name in new[]{"Launch","Apply","Restore","Detect","Choose","Report","ChooseImage","ClearImage","CropImage","EditColors","Mint"})Find<Button>(name).IsEnabled=enabled;Find<Button>("Launch").IsEnabled=enabled&&target!=null&&target.Compatible;Find<Button>("ClearImage").IsEnabled=Find<Button>("CropImage").IsEnabled=enabled&&!String.IsNullOrEmpty(settings.Wallpaper);Find<Button>("ImproveContrast").IsEnabled=enabled&&recommendedShade>=0;}
+    void Toggle(bool enabled){bool editing=palettePreview.Editing;foreach(string name in new[]{"Launch","Apply","Detect","Choose","ChooseImage","ClearImage","CropImage","EditColors","Mint"})Find<Button>(name).IsEnabled=enabled&&!editing;foreach(string name in new[]{"Restore","Report","SaveComposition","CancelComposition"})Find<Button>(name).IsEnabled=enabled;Find<Button>("Launch").IsEnabled=enabled&&!editing&&target!=null&&target.Compatible;Find<Button>("ClearImage").IsEnabled=Find<Button>("CropImage").IsEnabled=enabled&&!editing&&!String.IsNullOrEmpty(settings.Wallpaper);Find<Button>("ImproveContrast").IsEnabled=enabled&&!editing&&recommendedShade>=0;Find<Button>("UndoContrast").IsEnabled=enabled&&!editing;Find<StackPanel>("ImageEffects").IsEnabled=enabled&&!editing&&!String.IsNullOrEmpty(settings.Wallpaper);}
     void SetStatus(string text,bool error){var label=Find<TextBlock>("Status");label.Text=text;label.ToolTip=text;label.Foreground=(Brush)new BrushConverter().ConvertFromString(error?"#A14931":"#527367");}
 }
 internal static class SelfTest {
@@ -184,6 +213,17 @@ internal static class SelfTest {
         var w=Controller.LoadWindow();Controller.PopulateCompatibility(w);((TextBlock)w.FindName("Detection")).Text="微信 "+target.Version+"\n"+(target.Error??"已选择 "+target.Adapter?.Family);var content=(FrameworkElement)w.Content;content.Resources=w.Resources;content.SetValue(TextElement.ForegroundProperty,w.Foreground);content.SetValue(TextElement.FontFamilyProperty,w.FontFamily);var demo=new PalettePreview();demo.Update(loaded,null);((Border)w.FindName("Preview")).Child=demo;w.Content=null;content.Measure(new Size(1170,810));content.Arrange(new Rect(0,0,1170,810));content.UpdateLayout();
         var image=new RenderTargetBitmap(1170,810,96,96,PixelFormats.Pbgra32);image.Render(content);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using(var f=File.Create(Path.Combine(folder,"controller-preview.png")))encoder.Save(f);
         lines.Add("PASS: XAML loaded and rendered. DWM and Weixin rendering require live validation.");
+        CompositionTests(lines);
+        content.Measure(new Size(1064,701));content.Arrange(new Rect(0,0,1064,701));content.UpdateLayout();
+        var scroll=(ScrollViewer)w.FindName("SettingsScroll");var theme=(StackPanel)w.FindName("ThemePage");
+        Check(theme.ActualHeight<=scroll.ActualHeight+1,"Theme page fits minimum client area without scrolling or clipping",lines);
+        SaveFrame(content,1064,701,Path.Combine(folder,"controller-minimum.png"));
+        ((StackPanel)w.FindName("ThemePage")).Visibility=Visibility.Collapsed;((StackPanel)w.FindName("BackgroundPage")).Visibility=Visibility.Visible;
+        var source=new BitmapImage(new Uri(loaded.Wallpaper));demo.Update(loaded,source);demo.BeginComposition(source,new Rect(0,0,1,1));demo.ZoomComposition(1.6);
+        ((Border)w.FindName("CompositionTools")).Visibility=Visibility.Visible;((TextBlock)w.FindName("PreviewHelp")).Text="拖动图片 · 滚轮缩放 · 分区虚线仅为构图参考";
+        ((TextBlock)w.FindName("ContrastSummary")).Text="构图草稿 · 尚未保存";((TextBlock)w.FindName("ContrastDetails")).Text="构图时显示清晰原图，保存后恢复图片效果。分区位置为参考，以实际微信为准。";
+        content.Measure(new Size(1170,780));content.Arrange(new Rect(0,0,1170,780));content.UpdateLayout();SaveFrame(content,1170,780,Path.Combine(folder,"composition-preview.png"));
+        demo.EndComposition();
         ((Grid)w.FindName("Studio")).Visibility=Visibility.Collapsed;((Border)w.FindName("GuidePage")).Visibility=Visibility.Visible;
         content.Measure(new Size(1080,700));content.Arrange(new Rect(0,0,1080,700));content.UpdateLayout();
         var guideImage=new RenderTargetBitmap(1080,700,96,96,PixelFormats.Pbgra32);guideImage.Render(content);var guideEncoder=new PngBitmapEncoder();guideEncoder.Frames.Add(BitmapFrame.Create(guideImage));using(var f=File.Create(Path.Combine(folder,"guide-preview.png")))guideEncoder.Save(f);
@@ -191,6 +231,11 @@ internal static class SelfTest {
         lines.Add("No Weixin process launched, stopped or modified by these tests.");File.WriteAllLines(Path.Combine(folder,"results.txt"),lines,Encoding.UTF8);return 0;
     }
     static void Check(bool value,string label,System.Collections.Generic.List<string> lines){if(!value)throw new Exception("FAIL: "+label);lines.Add("PASS: "+label);}
+    static void SaveFrame(Visual content,int width,int height,string path){var image=new RenderTargetBitmap(width,height,96,96,PixelFormats.Pbgra32);image.Render(content);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using(var stream=File.Create(path))encoder.Save(stream);}
+    static void CompositionTests(System.Collections.Generic.List<string> lines){
+        foreach(double imageRatio in new[]{.5,1d,1.9,3.2}){var c=new Composition(imageRatio,new Rect(0,0,1,1));c.SetZoom(2);var before=c.Crop;c.Pan(before,.1,-.1);Check(Math.Abs(c.Crop.Width/c.Crop.Height*imageRatio-Composition.Ratio)<1e-8&&c.Crop.X<before.X&&c.Crop.Y>before.Y,"composition drag preserves export ratio and follows pointer on "+imageRatio,lines);c.Pan(c.Crop,100,-100);Check(c.Crop.X>=0&&c.Crop.Bottom<=1.000001,"composition stays inside original image",lines);c.SetZoom(99);Check(Math.Abs(c.Zoom-8)<1e-8,"composition zoom bounded",lines);c.Reset();Check(Math.Abs(c.Zoom-1)<1e-8,"composition reset returns full cover viewport",lines);}
+        var undo=new ShadeUndo();undo.Capture(28,50);undo.Observe(50);Check(undo.Take(out int shade)&&shade==28&&!undo.Available,"recommendation undo restores exact prior shade once",lines);undo.Capture(28,50);undo.Observe(51);Check(!undo.Available&&!undo.Take(out shade),"manual shade edit invalidates stale undo",lines);
+    }
     static void AdapterTests(System.Collections.Generic.List<string> lines){
         string h1=new string('a',64),h2=new string('b',64),h3=new string('c',64),error;
         var first=new AdapterProfile("weixin-4.1.15.56-x64","4.1.15.56",h1,"verified","",h2,h3);

@@ -12,7 +12,7 @@
     <AssemblyName>微信美化</AssemblyName>
     <Product>微信美化</Product>
     <Title>微信美化</Title>
-    <Version>0.6.0</Version>
+    <Version>0.7.0</Version>
     <!-- WPF owns DPI behavior; WinForms is used only for ColorDialog. -->
     <NoWarn>$(NoWarn);WFO0003</NoWarn>
   </PropertyGroup>
