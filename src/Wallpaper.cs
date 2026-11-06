@@ -38,7 +38,7 @@ internal static class Wallpaper {
     }
     static string ProcessCore(GlassSettings s) {
         s.Validate();if(String.IsNullOrEmpty(s.Wallpaper))return "";
-        if(!File.Exists(s.Wallpaper))throw new IOException("已保存的背景图不存在。请重新选择图片，或清除背景后使用系统毛玻璃。");
+        if(!File.Exists(s.Wallpaper))throw new IOException("已保存的背景图不存在。请重新选择图片，或切换为分区纯色。");
         string cropHash;using(var sha=SHA256.Create())cropHash=BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(s.CropKey))).Replace("-","").Substring(0,16);
         string key=Files.Hash(s.Wallpaper)+"-c"+cropHash+"-b"+s.Blur+"-t"+s.Shade+"-d"+(s.Dark?1:0),dir=Path.Combine(Files.Data,"effects");
         Directory.CreateDirectory(dir);string dest=Path.Combine(dir,key+".png");if(File.Exists(dest))return dest;

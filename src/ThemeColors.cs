@@ -8,6 +8,12 @@ using System.Text.RegularExpressions;
 
 internal sealed class ThemeColors {
     internal static readonly string[] Regions={"navigation","list","canvasBackground","input"};
+    internal static readonly string[] Supported={"navigation","list","canvasBackground","input","selection","text","secondary","selectedText"};
+    internal static bool Supports(string key){return Array.IndexOf(Supported,key)>=0;}
+    internal string Effective(GlassSettings s,string key){
+        if(Supports(key))return Get(s,key);
+        switch(key){case "outgoing":return "#A9E87B";case "incoming":return "#EDEDED";case "secondary":case "canvas":return "#929292";case "link":return "#527C99";case "accent":return "#07C160";default:return "#19191A";}
+    }
     internal static readonly string[] Keys={"navigation","list","canvasBackground","input","selection","outgoing","incoming","text","secondary","chat","canvas","selectedText","link","icons","accent"};
     internal static readonly string[] Names={"左侧导航栏","会话列表与搜索区","聊天消息区域","输入区域","选中的会话","发送气泡","接收气泡","会话名称与界面文字","摘要与辅助文字","消息正文（收发共用）","聊天区说明文字","选中会话文字","消息链接（收发共用）","普通图标","强调色图标"};
     readonly Dictionary<string,string> colors=new Dictionary<string,string>();

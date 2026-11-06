@@ -1,17 +1,29 @@
 # 来源与外部组件
 
-原生绘制基础：[Windows-WeChat-Theme-Studio](https://github.com/starfalll521/Windows-WeChat-Theme-Studio)
-固定提交：37d8188502ed4365ddcde928c7b2e50fda5e7226，作者 starfalll521。
+## 0.5 当前构建
 
-`fetch-upstream.ps1` 从该固定提交下载 `native/runtime.c`，文件 SHA-256 为 `4473abd121825524676ce6dcea7fb310bd6266541d10d4039380423ff7be3a06`。`native/prepare-runtime.cjs` 校验源码后生成本地研究构建，增加 `glass-extension.c` 的 Qt 透明背景、DWM 材质、回执及文件校验，并调整分区绘制。DLL 由 MSVC 编译，控制器嵌入其 SHA-256。
+默认 `build.ps1` 只编译 `native/independent/engine-entry.c`、`semantic-engine.cpp`、本仓库客户端与相应头文件。没有下载、编译或打包上游 runtime.c、旧混合引擎、Frida 或 Ghidra。
 
-用户提供的 -1.0.zip 曾用于检查清单与结构；当前构建不提取该 ZIP 的 DLL。原模块 SHA-256：9ee2f5c8aa9cd4e120507f516d3eb15656e3d2a7b7ee49cd0786a62e43002433。
+自研引擎采用经过本机微信文件哈希约束的共享虚表接入、原生背景绘制、GUI 线程配置轮询和请求回执。布局/ABI事实从安装的 Weixin.dll 独立静态检查与 REA Frida 运行观察核对。旧引擎的背景、文字分层设计曾被阅读和研究；这不是法律意义上经过隔离的 clean-room 项目，不作无条件的无侵权或再许可保证。
 
-截至 2026-11-06 检查，上游未提供 LICENSE。公开可读取不等于可以任意再分发。本仓库不附带上游源码、生成的混合源码或编译后的原生 DLL；构建时由用户从上游直接获取固定版本。构建产物包含上游代码，再分发前需获得所需许可或替换相关代码。下载和本地构建步骤不构成上游作者的授权或背书。
+客户端、图片裁剪/处理、配置协议、可读性检查、青屿渐变背景和界面图形由本项目生成或编写。个人导入图片不打包、不上传。Windows、.NET 和微信相关权利属于各自权利人。
 
-视觉参考：[qqnt-liuli-theme](https://github.com/LilycleHeart/qqnt-liuli-theme)
-作者 LilycleHeart，参考提交：dda858b7f5366b489773b9b08dac0cac3105e5f4。参考半透明材质、分区与配色思路，未移植 QQ 插件、CSS 或图片素材。该项目检查时同样未声明许可证，本项目不依赖其插件环境。
+## 历史原生引擎参考
 
-WPF 控制器、图片处理与裁剪、分区配色编辑器、可读性检查、设置、启动与连接检查、配置回执处理为本项目新写。当前仓库未授予统一开源许可证。第三方代码与素材的权利属于各自权利人；引用与致谢不代替许可。普通 PE、反汇编和 SHA-256 检查用于限定接口假设，不能等同于实机验证。
+[Windows-WeChat-Theme-Studio](https://github.com/starfalll521/Windows-WeChat-Theme-Studio)，作者 starfalll521，固定提交 `37d8188502ed4365ddcde928c7b2e50fda5e7226`。
 
-微信目标：4.1.15.56 x64；Weixin.dll SHA-256：e0428a7b691853de496532523c2c09aa095f90941c37c9f4cfb3f137f3c66556。
+旧版使用 `native/runtime.c`，SHA-256 `4473abd121825524676ce6dcea7fb310bd6266541d10d4039380423ff7be3a06`。历史脚本 `fetch-upstream.ps1` 和 `native/prepare-runtime.cjs` 保留以解释旧构建，但默认构建不再调用。不要把旧 dist、research 中的混合 DLL 加入新发布包。
+
+截至 2026-11-06 检查，上游未提供明确 LICENSE；引用致谢不能代替授权。旧上游源码、生成混合源码和二进制均不纳入本仓库再分发。
+
+用户提供的 `-1.0.zip` 曾用于结构调查；当前构建不提取或加载其中的 DLL。
+
+## 视觉参考
+
+[qqnt-liuli-theme](https://github.com/LilycleHeart/qqnt-liuli-theme)，作者 LilycleHeart，参考提交 `dda858b7f5366b489773b9b08dac0cac3105e5f4`。参考半透明材质、分区与配色思路，未移植插件、CSS 或素材，不依赖 QQ 插件环境。
+
+## 适配与许可边界
+
+微信目标为 4.1.15.56 x64，Weixin.dll SHA-256 `e0428a7b691853de496532523c2c09aa095f90941c37c9f4cfb3f137f3c66556`。不打包或修改微信安装文件。分析工具仅用于开发，分析证据保留在忽略的 research 目录；公开研究摘要见 `native/independent/RESEARCH.md`。
+
+当前仓库没有统一开源许可证。公开源码不等于向所有第三方内容授予许可。项目与腾讯、微信和参考作者均无隶属关系。

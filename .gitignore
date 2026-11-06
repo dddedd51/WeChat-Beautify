@@ -2,6 +2,7 @@ dist/
 research/
 obj/
 bin/
+releases/
 *.zip
 
 # Local settings, media, diagnostics and generated binaries.
