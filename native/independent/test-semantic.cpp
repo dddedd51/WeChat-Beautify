@@ -11,11 +11,11 @@ int main(){using namespace semantic;
     assert(protectedBranch("mmui::AvatarView"));
     assert(protectedBranch("mmui::DiscoverPage"));
     LayoutNode chain[]={
-        {0x9b64a88,{0,325,189,65}},{0x8ffbb98,{0,-130,189,17160}},
-        {0x8ffbb98,{0,0,189,646}},{0x938b3b8,{0,0,189,646}},
-        {0x9b62c98,{0,48,189,646}},{0x97beb48,{0,32,762,694}},
-        {0x8ffbb98,{60,0,766,730}},{0x97beb48,{0,0,826,730}},
-        {0x91e41e8,{0,0,826,730}},{0x983c628,{859,201,826,730}}
+        {adapter::SessionCell,{0,325,189,65}},{adapter::Widget,{0,-130,189,17160}},
+        {adapter::Widget,{0,0,189,646}},{adapter::TableView,{0,0,189,646}},
+        {adapter::SessionList,{0,48,189,646}},{adapter::MainView,{0,32,762,694}},
+        {adapter::Widget,{60,0,766,730}},{adapter::MainView,{0,0,826,730}},
+        {adapter::StackedWidget,{0,0,826,730}},{adapter::MainWindow,{859,201,826,730}}
     };
     auto l=locateRoot(chain,10);assert(l.valid&&l.rootIndex==7);
     assert(l.x==60&&l.y==275&&l.root.width==826&&l.local.height==65);

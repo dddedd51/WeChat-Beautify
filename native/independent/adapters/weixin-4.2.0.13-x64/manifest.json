@@ -1,0 +1,10 @@
+{
+  "id": "weixin-4.2.0.13-x64",
+  "version": "4.2.0.13",
+  "architecture": "x64",
+  "targetSha256": "afe3d02c58bada3c35009c0cd58ee1f57b2a00fe53237d0dce649107fddb9a20",
+  "status": "verified",
+  "family": "4.2.0.X",
+  "matchPrefix": "4.2.0.",
+  "reason": "4.2.0.13 已完成本机普通启动、背景与选中项显示、恢复默认和重新应用；其他同系列构建未逐一实测。"
+}

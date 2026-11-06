@@ -37,6 +37,7 @@ internal sealed class Controller {
     internal static Window LoadWindow(){using(var s=Assembly.GetExecutingAssembly().GetManifestResourceStream("MainWindow.xaml"))return (Window)XamlReader.Load(s);}
     internal Controller(){
         Window=LoadWindow();settings=GlassSettings.Load();manual=settings.Exe;
+        PopulateCompatibility(Window);
         if(!File.Exists(Path.Combine(Files.Data,"settings.ini"))){ThemePresets.Mint(settings);settings.Save();}
         foreach(string page in new[]{"Theme","Background","Colors","Guide"}){string name=page;Find<RadioButton>("Nav"+name).Checked+=(s,e)=>ShowPage(name);}
         Find<Button>("Mint").Click+=async(s,e)=>await Work(async()=>{var next=Read();await Task.Run(()=>ThemePresets.Mint(next));settings=next;Find<CheckBox>("Dark").IsChecked=false;Find<Slider>("ImageBlur").Value=settings.Blur;Find<Slider>("ImageShade").Value=settings.Shade;settings.Save();Preview();SetStatus("青屿主题已准备好。点击「更新主题」应用到微信。",false);});
@@ -97,9 +98,21 @@ internal sealed class Controller {
         finally{previewRunning=false;if(initialized&&(previewPending||generation!=previewGeneration)){previewPending=false;previewTimer.Start();}}
     }
     void ShowContrast(ContrastReport report){recommendedShade=report.RecommendedShade;Find<TextBlock>("ContrastSummary").Text=report.Summary;Find<TextBlock>("ContrastDetails").Text=report.Details;Find<TextBlock>("ContrastSummary").Foreground=(Brush)new BrushConverter().ConvertFromString(report.Pass?"#217D5C":"#936526");Find<Button>("ImproveContrast").IsEnabled=recommendedShade>=0&&!busy;}
-    async Task Detect(){await Work(async()=>{target=await Task.Run(()=>Weixin.Locate(manual));if(target.Compatible){manual=target.Exe;Find<TextBlock>("Detection").Text="✓  文件校验一致\n微信 "+target.Version;SetStatus(Weixin.Count()>0?"微信正在运行。首次启用请先从托盘退出微信；当前会话不会被强制关闭。":"微信版本兼容，可以启动主题微信。",false);}else{Find<TextBlock>("Detection").Text="尚未就绪";SetStatus(target.Error,true);}});}
+    internal static void PopulateCompatibility(Window window){
+        ((TextBlock)window.FindName("CompatibilitySummary")).Text=Adapters.Summary;
+        ((TextBlock)window.FindName("CompatibilityGuide")).Text=Adapters.Summary+"\n\nX 表示同系列最后一段版本号。仅标注的完整版本和文件在本机实测过；其他小版本允许尝试，可能显示错误或崩溃。启动时会检查关键绘制结构，通过检查不代表已实测。\n显示异常先点「恢复默认」；若无法正常操作，从托盘完全退出，再用原微信入口启动。新系列需要独立适配。";
+    }
+    async Task Detect(){await Work(async()=>{
+        target=await Task.Run(()=>Weixin.Locate(manual));
+        if(target.Compatible){
+            manual=target.Exe;bool tested=target.Adapter.IsTestedBuild(target.Version,target.Hash);
+            Find<TextBlock>("Detection").Text=(tested?"✓  实测构建一致":target.Adapter.Status=="experimental"?"△  实验适配 · 待实机验证":"△  同系列试用 · 未经实测")+"\n微信 "+target.Version;
+            SetStatus(tested?(Weixin.Count()>0?"微信正在运行。首次启用请先从托盘退出微信。":"已找到适配器，可以启动主题微信。"):
+                "匹配 "+target.Adapter.Family+"；"+(target.Adapter.Status=="verified"?"实测基准为 ":"实验适配基准为 ")+target.Adapter.Version+"。当前构建允许尝试，可能显示错误或崩溃；异常请恢复默认，无法操作时退出并用原微信入口启动。",!tested);
+        }else{Find<TextBlock>("Detection").Text="微信 "+(target.Version??"未找到")+"\n暂不可启用主题";SetStatus(target.Error,true);}
+    });}
     async Task Work(Func<Task> action){if(busy)return;busy=true;Toggle(false);SetStatus("正在处理，请稍候…",false);try{await action();}catch(Exception e){SetStatus(e.Message,true);}finally{busy=false;Toggle(true);}Find<TextBlock>("Connection").Text=await Task.Run(()=>Engine.Connection());}
-    void Toggle(bool enabled){foreach(string name in new[]{"Launch","Apply","Restore","Detect","Choose","Report","ChooseImage","ClearImage","CropImage","EditColors","Mint"})Find<Button>(name).IsEnabled=enabled;Find<Button>("ClearImage").IsEnabled=Find<Button>("CropImage").IsEnabled=enabled&&!String.IsNullOrEmpty(settings.Wallpaper);Find<Button>("ImproveContrast").IsEnabled=enabled&&recommendedShade>=0;}
+    void Toggle(bool enabled){foreach(string name in new[]{"Launch","Apply","Restore","Detect","Choose","Report","ChooseImage","ClearImage","CropImage","EditColors","Mint"})Find<Button>(name).IsEnabled=enabled;Find<Button>("Launch").IsEnabled=enabled&&target!=null&&target.Compatible;Find<Button>("ClearImage").IsEnabled=Find<Button>("CropImage").IsEnabled=enabled&&!String.IsNullOrEmpty(settings.Wallpaper);Find<Button>("ImproveContrast").IsEnabled=enabled&&recommendedShade>=0;}
     void SetStatus(string text,bool error){var label=Find<TextBlock>("Status");label.Text=text;label.ToolTip=text;label.Foreground=(Brush)new BrushConverter().ConvertFromString(error?"#A14931":"#527367");}
 }
 internal static class SelfTest {
@@ -124,7 +137,8 @@ internal static class SelfTest {
         Files.Atomic(Path.Combine(folder,"atomic.txt"),"old",Encoding.UTF8);Files.Atomic(Path.Combine(folder,"atomic.txt"),"new",Encoding.UTF8);
         Check(File.ReadAllText(Path.Combine(folder,"atomic.txt"))=="new","atomic replacement",lines);
         bool rejected=false;try{Config.Build(new GlassSettings{Density=999},true);}catch(InvalidDataException){rejected=true;}Check(rejected,"invalid concentration rejected",lines);
-        string foreign=Path.Combine(folder,"foreign.dll");File.WriteAllText(foreign,"not an engine");rejected=false;try{Engine.ValidateRuntime(foreign);}catch(IOException){rejected=true;}Check(rejected,"unknown runtime rejected",lines);
+        string foreign=Path.Combine(folder,"foreign.dll");File.WriteAllText(foreign,"not an engine");rejected=false;try{Engine.ValidateRuntime(foreign,Adapters.All[0]);}catch(IOException){rejected=true;}Check(rejected,"unknown runtime rejected",lines);
+        AdapterTests(lines);
         string original=Path.Combine(folder,"测试 背景.png");
         using(var sample=new System.Drawing.Bitmap(96,64)){
             using(var g=System.Drawing.Graphics.FromImage(sample)){g.Clear(System.Drawing.Color.FromArgb(30,90,170));g.FillRectangle(System.Drawing.Brushes.Orange,0,0,48,64);}
@@ -167,7 +181,7 @@ internal static class SelfTest {
         Config.Prepare(s,false);lines.Add("PASS: recovery works even if wallpaper is missing");
         s.Wallpaper="";Check(Config.Build(s,true).Contains("wallpaper=\r\n"),"clear wallpaper switches to solid colors",lines);
         ThemePresets.Mint(loaded);Check(loaded.Colors.Get(loaded,"selection")=="#39C5BB"&&File.Exists(loaded.Wallpaper),"Qingyu preset creates local original background and exact accent",lines);Check(Readability.Analyze(loaded).Pass,"Qingyu list and selection colors pass contrast",lines);var target=Weixin.Locate(null);lines.Add("Installed target: "+target.Version+" / hash compatible="+target.Compatible);
-        var w=Controller.LoadWindow();var content=(FrameworkElement)w.Content;content.Resources=w.Resources;content.SetValue(TextElement.ForegroundProperty,w.Foreground);content.SetValue(TextElement.FontFamilyProperty,w.FontFamily);var demo=new PalettePreview();demo.Update(loaded,null);((Border)w.FindName("Preview")).Child=demo;w.Content=null;content.Measure(new Size(1170,810));content.Arrange(new Rect(0,0,1170,810));content.UpdateLayout();
+        var w=Controller.LoadWindow();Controller.PopulateCompatibility(w);((TextBlock)w.FindName("Detection")).Text="微信 "+target.Version+"\n"+(target.Error??"已选择 "+target.Adapter?.Family);var content=(FrameworkElement)w.Content;content.Resources=w.Resources;content.SetValue(TextElement.ForegroundProperty,w.Foreground);content.SetValue(TextElement.FontFamilyProperty,w.FontFamily);var demo=new PalettePreview();demo.Update(loaded,null);((Border)w.FindName("Preview")).Child=demo;w.Content=null;content.Measure(new Size(1170,810));content.Arrange(new Rect(0,0,1170,810));content.UpdateLayout();
         var image=new RenderTargetBitmap(1170,810,96,96,PixelFormats.Pbgra32);image.Render(content);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using(var f=File.Create(Path.Combine(folder,"controller-preview.png")))encoder.Save(f);
         lines.Add("PASS: XAML loaded and rendered. DWM and Weixin rendering require live validation.");
         ((Grid)w.FindName("Studio")).Visibility=Visibility.Collapsed;((Border)w.FindName("GuidePage")).Visibility=Visibility.Visible;
@@ -177,4 +191,24 @@ internal static class SelfTest {
         lines.Add("No Weixin process launched, stopped or modified by these tests.");File.WriteAllLines(Path.Combine(folder,"results.txt"),lines,Encoding.UTF8);return 0;
     }
     static void Check(bool value,string label,System.Collections.Generic.List<string> lines){if(!value)throw new Exception("FAIL: "+label);lines.Add("PASS: "+label);}
+    static void AdapterTests(System.Collections.Generic.List<string> lines){
+        string h1=new string('a',64),h2=new string('b',64),h3=new string('c',64),error;
+        var first=new AdapterProfile("weixin-4.1.15.56-x64","4.1.15.56",h1,"verified","",h2,h3);
+        var second=new AdapterProfile("weixin-4.1.16.1-x64","4.1.16.1",h2,"experimental","",h3,h1);
+        var pending=new AdapterProfile("weixin-4.2.0.13-x64","4.2.0.13",h3,"pending","接口待适配","","");
+        var profiles=new[]{first,second,pending};
+        Check(Adapters.Resolve(profiles,"4.1.15.56",0x8664,h1,out error)==first&&error==null&&first.IsTestedBuild("4.1.15.56",h1),"exact tested build selects its adapter",lines);
+        Check(Adapters.Resolve(profiles,"4.1.15.99",0x8664,h2,out error)==first&&!first.IsTestedBuild("4.1.15.99",h2),"rolling patch version uses family adapter as untested trial",lines);
+        Check(Adapters.Resolve(profiles,"4.1.15.56",0x8664,h2,out error)==first&&!first.IsTestedBuild("4.1.15.56",h2),"changed file with same version is trial, never falsely tested",lines);
+        Check(Adapters.Resolve(profiles,"4.1.16.2",0x8664,h1,out error)==second,"second family selects its own adapter",lines);
+        Check(Adapters.Resolve(profiles,"4.1.150.56",0x8664,h1,out error)==null&&Adapters.Resolve(profiles,"4.1.15.56.extra",0x8664,h1,out error)==null,"prefix lookalike and malformed version rejected",lines);
+        Check(Adapters.Resolve(profiles,"4.1.15.56",0x14c,h1,out error)==null,"x86 cannot use an x64 adapter",lines);
+        Check(Adapters.Resolve(profiles,"4.2.0.99",0x8664,h3,out error)==null&&error.Contains("待适配"),"pending family never loads native code",lines);
+        Check(Adapters.Resolve(profiles,"4.3.0.1",0x8664,h1,out error)==null,"unknown family has no cross-version fallback",lines);
+        var rebuilt=new AdapterProfile(first.Id,first.Version,h1,"verified","",h1,h3);
+        Check(first.Runtime!=second.Runtime&&first.Runtime!=rebuilt.Runtime,"adapter runtime separates versions and changed entry binaries",lines);
+        bool rejected=false;try{new AdapterProfile("../bad","4.1.15.56",h1,"verified","",h2,h3);}catch(InvalidDataException){rejected=true;}Check(rejected,"unsafe manifest identifier rejected",lines);
+        Check(!Engine.IsReady("incompatible")&&!Engine.IsReady("failed")&&Engine.IsReady("ready"),"loaded DLL alone is not a ready engine",lines);
+        foreach(var adapter in Adapters.All){if(!adapter.CanLoad)continue;Engine.ValidatePair(adapter.Bundle(AppDomain.CurrentDomain.BaseDirectory),adapter);Check(true,"bundled DLL pair validated for "+adapter.Family,lines);}
+    }
 }

@@ -1,0 +1,9 @@
+{
+  "id": "weixin-4.1.15.56-x64",
+  "version": "4.1.15.56",
+  "architecture": "x64",
+  "targetSha256": "e0428a7b691853de496532523c2c09aa095f90941c37c9f4cfb3f137f3c66556",
+  "status": "verified",
+  "family": "4.1.15.X",
+  "matchPrefix": "4.1.15."
+}

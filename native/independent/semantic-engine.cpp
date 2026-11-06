@@ -10,7 +10,8 @@
 #include <algorithm>
 #include "semantic-policy.h"
 #include "semantic-layout.h"
-#include "paint-targets.generated.h"
+#include "selected-adapter.h"
+#include BEAUTIFY_PAINT_HEADER
 static unsigned char*module;
 static DWORD guiThread;
 static wchar_t configPath[MAX_PATH],reportPath[MAX_PATH],receiptPath[MAX_PATH];
@@ -38,10 +39,10 @@ static bool readable(const void*p,size_t length){
 }
 template<class T>static T get(const void*p,T fallback=T{}){return readable(p,sizeof(T))?*(const T*)p:fallback;}
 static void log(const char*what,int a=0,int b=0){FILE*f=_wfopen(reportPath,L"a");if(f){fprintf(f,"%s %d %d tid=%lu\n",what,a,b,GetCurrentThreadId());fclose(f);}}
-static void receipt(const wchar_t*state){
+static void receipt(const wchar_t*state,const wchar_t*reason=L""){
     wchar_t temp[MAX_PATH];if(swprintf(temp,MAX_PATH,L"%ls.tmp",receiptPath)<0)return;
     FILE*f=_wfopen(temp,L"w, ccs=UTF-8");if(!f)return;
-    fwprintf(f,L"protocol=1\npid=%lu\nrevision=%ls\nstate=%ls\nwallLoaded=%d\n",GetCurrentProcessId(),revision,state,imageAsset?1:0);fclose(f);
+    fwprintf(f,L"protocol=1\npid=%lu\nrevision=%ls\nstate=%ls\nreason=%ls\nwallLoaded=%d\n",GetCurrentProcessId(),revision,state,reason,imageAsset?1:0);fclose(f);
     MoveFileExW(temp,receiptPath,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
 }
 using Paint=uintptr_t(*)(void*,void*);
@@ -50,9 +51,9 @@ static bool installed;
 struct Patched {void**slot;void*original;const PaintTarget*target;unsigned observed=0;};
 static std::vector<Patched>patched;
 static const char*typeOf(void*object){auto table=get<uintptr_t>(object);if(table<(uintptr_t)module)return "unknown";unsigned rva=(unsigned)(table-(uintptr_t)module);for(const auto&t:objectTypes)if(t.primary==rva)return t.name;return "unknown";}
-static void*parentOf(void*object){auto data=get<unsigned char*>((unsigned char*)object+8);return data?get<void*>(data+16):nullptr;}
+static void*parentOf(void*object){auto data=get<unsigned char*>((unsigned char*)object+adapter::ObjectDataOffset);return data?get<void*>(data+adapter::ParentOffset):nullptr;}
 using Geometry=semantic::Geometry;
-static bool geometry(void*object,Geometry&g){auto d=get<unsigned char*>((unsigned char*)object+0x28);if(!readable(d,0x24))return false;g.x=get<int>(d+0x14);g.y=get<int>(d+0x18);int64_t w=(int64_t)get<int>(d+0x1c)-g.x+1,h=(int64_t)get<int>(d+0x20)-g.y+1;if(w<=0||h<=0||w>16777215||h>16777215)return false;g.width=(int)w;g.height=(int)h;return semantic::validGeometry(g);}
+static bool geometry(void*object,Geometry&g){auto d=get<unsigned char*>((unsigned char*)object+adapter::WidgetDataOffset);if(!readable(d,adapter::GeometryBottom+sizeof(int)))return false;g.x=get<int>(d+adapter::GeometryX);g.y=get<int>(d+adapter::GeometryY);int64_t w=(int64_t)get<int>(d+adapter::GeometryRight)-g.x+1,h=(int64_t)get<int>(d+adapter::GeometryBottom)-g.y+1;if(w<=0||h<=0||w>16777215||h>16777215)return false;g.width=(int)w;g.height=(int)h;return semantic::validGeometry(g);}
 struct Location {Geometry local{},root{};int x=0,y=0;void*rootObject=nullptr;void*rowObject=nullptr;semantic::Region region=semantic::Region::Base;bool valid=false,rowPath=false,rowText=false;};
 static Location locate(void*object){
     Location l;semantic::LayoutNode nodes[48]{};void*objects[48]{};size_t count=0;
@@ -62,10 +63,10 @@ static Location locate(void*object){
         if(l.region==semantic::Region::Base&&role!=semantic::Region::Base&&role!=semantic::Region::Preserve)l.region=role;
         Geometry g;if(!geometry(node,g))return l;
         nodes[count]={(unsigned)(get<uintptr_t>(node)-(uintptr_t)module),g};objects[count++]=node;
-        if(nodes[count-1].type==0x983c628){
+        if(adapter::IsMainWindow(nodes[count-1].type)){
             auto layout=semantic::locateRoot(nodes,count);l.local=layout.local;l.root=layout.root;l.x=layout.x;l.y=layout.y;l.valid=layout.valid;if(l.valid)l.rootObject=objects[layout.rootIndex];l.rowPath=semantic::sessionRowPrefix(nodes,count);
             // Observed label -> QWidget -> QWidget -> label container -> row.
-            l.rowText=count>=9&&(nodes[0].type==0x9883ab8||nodes[0].type==0x93ab1e8)&&nodes[1].type==0x8ffbb98&&nodes[2].type==0x8ffbb98&&nodes[3].type==0x9d261e8&&semantic::sessionRowPrefix(nodes+4,count-4);
+            l.rowText=count>=9&&(nodes[0].type==adapter::PrimaryText||nodes[0].type==adapter::TextView)&&nodes[1].type==adapter::Widget&&nodes[2].type==adapter::Widget&&nodes[3].type==adapter::LabelContainer&&semantic::sessionRowPrefix(nodes+4,count-4);
             if(l.rowText)l.rowObject=objects[4];return l;
         }
         void*next=parentOf(node);if(next==node)return l;node=next;
@@ -79,9 +80,9 @@ static void*loadImage(const wchar_t*file){
     size_t len=wcslen(file);if(!len||len>=1024)return nullptr;
     std::vector<uint64_t>storage((sizeof(StringBlock)+(len+1)*2+7)/8);auto*b=(StringBlock*)storage.data();b->refs=-1;b->length=(int)len;b->capacity=0;b->offset=sizeof(StringBlock);memcpy((char*)b+b->offset,file,(len+1)*2);void*string=b;
     alignas(16) unsigned char qimage[64]={},wrapper[64]={};
-    ((void*(*)(void*,void*,const char*))(module+0x4fd250))(qimage,&string,nullptr);
-    ((void*(*)(void*,void*))(module+0x70b60))(wrapper,qimage);
-    ((void(*)(void*))(module+0x4fdbc0))(qimage);
+    ((void*(*)(void*,void*,const char*))(module+adapter::ImageConstruct))(qimage,&string,nullptr);
+    ((void*(*)(void*,void*))(module+adapter::ImageWrap))(wrapper,qimage);
+    ((void(*)(void*))(module+adapter::ImageDestroy))(qimage);
     void*out=get<void*>(wrapper);return readable(out,40)?out:nullptr;
 }
 static bool reload(){
@@ -107,7 +108,7 @@ static bool reload(){
 static void CALLBACK tick(HWND,UINT,UINT_PTR,DWORD){
     if(inside||GetCurrentThreadId()!=guiThread)return;inside=true;
     try{if(reload()&&rootObject&&get<void*>((unsigned char*)rootObject+8)==rootIdentity&&!strcmp(typeOf(rootObject),"mmui::MainView")){
-        ((void(*)(void*))(module+0x5b7260))(rootObject);log("root-update-requested",enabled);
+        ((void(*)(void*))(module+adapter::WidgetUpdate))(rootObject);log("root-update-requested",enabled);
     }}catch(...){enabled=false;log("config-exception");}inside=false;
 }
 static bool render(void*canvas,const Location&l,bool selected=false){
@@ -117,39 +118,39 @@ static bool render(void*canvas,const Location&l,bool selected=false){
     float left=(l.root.width-imageWidth*scale)/2-l.x,top=(l.root.height-imageHeight*scale)/2-l.y;
     float imageRect[]={left,top,left+imageWidth*scale,top+imageHeight*scale};
     alignas(8) unsigned char sampling[24]={};sampling[16]=1;
-    ((void(*)(void*,void*,const float*,const void*,const void*))(module+0x53fa30))(canvas,imageAsset,imageRect,sampling,nullptr);
+    ((void(*)(void*,void*,const float*,const void*,const void*))(module+adapter::CanvasImage))(canvas,imageAsset,imageRect,sampling,nullptr);
     }
     int index=l.region==semantic::Region::Navigation?0:l.region==semantic::Region::List?1:l.region==semantic::Region::Input?3:2;
     if(selected||!imageAsset||opacity[index]){
         alignas(16) unsigned char paint[80]={};
-        ((void*(*)(void*))(module+0x532fd0))(paint);
+        ((void*(*)(void*))(module+adapter::PaintConstruct))(paint);
         unsigned color=selected?selectionColor:(colors[index]&0xffffff)|((unsigned)(imageAsset?opacity[index]*255/100:255)<<24);
-        ((void(*)(void*,unsigned))(module+0x533980))(paint,color);
+        ((void(*)(void*,unsigned))(module+adapter::PaintSetColor))(paint,color);
         float rect[]={0,0,(float)l.local.width,(float)l.local.height};
-        ((void(*)(void*,const float*,const void*))(module+0x53cd00))(canvas,rect,paint);
-        ((void(*)(void*))(module+0x5332b0))(paint);
+        ((void(*)(void*,const float*,const void*))(module+adapter::CanvasRect))(canvas,rect,paint);
+        ((void(*)(void*))(module+adapter::PaintDestroy))(paint);
     }
     return true;
 }
 static void paintColor(void*object,unsigned color){
-    auto*field=(unsigned*)((unsigned char*)object+0x234);if(*field==color)return;
+    auto*field=(unsigned*)((unsigned char*)object+adapter::TextColorOffset);if(*field==color)return;
     // Verified setter split: update the native color/cache, invalidate the
     // paragraph with notify=false. Scheduling QWidget updates inside paint
     // would create a perpetual repaint loop when the temporary color restores.
-    *field=color;((void(*)(void*))(module+0x1e9f0c0))((unsigned char*)object+0x188);
-    auto holder=get<void*>((unsigned char*)object+0x3e0);auto paragraph=get<void*>(holder);
-    ((void(*)(void*,int,bool))(module+0x6249740))(paragraph,1,false);
+    *field=color;((void(*)(void*))(module+adapter::TextCacheInvalidate))((unsigned char*)object+adapter::TextCacheOffset);
+    auto holder=get<void*>((unsigned char*)object+adapter::ParagraphHolderOffset);auto paragraph=get<void*>(holder);
+    ((void(*)(void*,int,bool))(module+adapter::ParagraphInvalidate))(paragraph,1,false);
 }
 static bool canColor(void*object){
-    auto holder=get<void*>((unsigned char*)object+0x3e0);auto paragraph=get<void*>(holder);auto table=get<unsigned char*>(paragraph);
-    return readable((unsigned char*)object+0x234,4)&&readable(paragraph,0x240)&&get<void*>(table+0x78)==module+0x44e7bd0;
+    auto holder=get<void*>((unsigned char*)object+adapter::ParagraphHolderOffset);auto paragraph=get<void*>(holder);auto table=get<unsigned char*>(paragraph);
+    return readable((unsigned char*)object+adapter::TextColorOffset,4)&&readable(paragraph,adapter::ParagraphMinimumBytes)&&get<void*>(table+adapter::ParagraphVirtualOffset)==module+adapter::ParagraphVirtual;
 }
 static uintptr_t rowDispatch(void*self,void*canvas){
     if(GetCurrentThreadId()!=guiThread||inside||!enabled)return originalRow(self,canvas);
-    auto*object=(unsigned char*)self-0x120;
+    auto*object=(unsigned char*)self-adapter::RowInterfaceOffset;
     if(strcmp(typeOf(object),"mmui::ChatSessionCell"))return originalRow(self,canvas);
     inside=true;Location l=locate(object);bool changed=false;
-    try{if(l.valid&&l.rowPath&&l.region==semantic::Region::List)changed=render(canvas,l,get<unsigned char>(object+0x210)==1);}catch(...){enabled=false;}
+    try{if(l.valid&&l.rowPath&&l.region==semantic::Region::List)changed=render(canvas,l,get<unsigned char>(object+adapter::RowSelectedOffset)==1);}catch(...){enabled=false;}
     static unsigned rowCount=0;if(changed&&++rowCount==1)log("session-row-background",l.x,l.y);
     inside=false;return changed?0:originalRow(self,canvas);
 }
@@ -157,14 +158,14 @@ static uintptr_t dispatch(void*self,void*canvas){
     auto table=get<void**>(self);if(!table)return 0;Patched*entry=nullptr;for(auto&r:patched)if(r.slot==table+1){entry=&r;break;}if(!entry)return 0;
     auto original=(Paint)entry->original;
     if(inside||GetCurrentThreadId()!=guiThread)return original(self,canvas);
-    inside=true;void*object=(unsigned char*)self-192;Location l=locate(object);
+    inside=true;void*object=(unsigned char*)self-adapter::PaintInterfaceOffset;Location l=locate(object);
     bool changed=false;
     try{
         if(l.valid){rootObject=l.rootObject;rootIdentity=get<void*>((unsigned char*)rootObject+8);}
         if(l.valid&&pendingReceipt){pendingReceipt=false;receipt(enabled?L"applied":L"disabled");}
         if(entry->observed++==0){log(entry->target->name,l.valid,l.local.width);}
-        if(enabled&&l.valid&&l.rowText&&entry->target->callback==0x1ea62d0&&canColor(object)){
-            unsigned saved=get<unsigned>((unsigned char*)object+0x234),desired=get<unsigned char>((unsigned char*)l.rowObject+0x210)==1?selectedText:entry->target->primary==0x9883ab8?primaryText:secondaryText;
+        if(enabled&&l.valid&&l.rowText&&entry->target->callback==adapter::TextPaint&&canColor(object)){
+            unsigned saved=get<unsigned>((unsigned char*)object+adapter::TextColorOffset),desired=get<unsigned char>((unsigned char*)l.rowObject+adapter::RowSelectedOffset)==1?selectedText:entry->target->primary==adapter::PrimaryText?primaryText:secondaryText;
             auto setter=paintColor;
             // The original native text painter sees the chosen color. Restore
             // immediately so selection, future pages and theme-off keep native state.
@@ -172,9 +173,9 @@ static uintptr_t dispatch(void*self,void*canvas){
             setter(object,desired);uintptr_t result=original(self,canvas);setter(object,saved);inside=false;return result;
         }
         // An attached custom paint resource is not a plain background surface.
-        bool custom=get<void*>((unsigned char*)object+0x160)!=nullptr;
+        bool custom=get<void*>((unsigned char*)object+adapter::CustomPaintOffset)!=nullptr;
         bool namedRegion=l.region!=semantic::Region::Base||!strcmp(entry->target->name,"mmui::MainView");
-        if(enabled&&l.valid&&namedRegion&&!custom&&entry->target->callback!=0x1ea62d0&&semantic::classify(entry->target->name)!=semantic::Region::Preserve)changed=render(canvas,l);
+        if(enabled&&l.valid&&namedRegion&&!custom&&entry->target->callback!=adapter::TextPaint&&semantic::classify(entry->target->name)!=semantic::Region::Preserve)changed=render(canvas,l);
         if(changed&&++paintCount%240==1)log("native-background",(int)paintCount,l.local.width);
     }catch(...){enabled=false;log("exception-disabled");}
     inside=false;return changed?0:original(self,canvas);
@@ -185,8 +186,54 @@ static bool setSlot(void**slot,void*expected,void*desired){
 }
 static bool restoreSlots(){
     bool ok=true;for(auto&r:patched){if(get<void*>(r.slot)==(void*)dispatch)setSlot(r.slot,(void*)dispatch,r.original);if(get<void*>(r.slot)==(void*)dispatch)ok=false;}
-    auto rowSlot=(void**)(module+0x9b64d50);if(get<void*>(rowSlot)==(void*)rowDispatch)setSlot(rowSlot,(void*)rowDispatch,(void*)originalRow);
+    auto rowSlot=(void**)(module+adapter::RowSlot);if(get<void*>(rowSlot)==(void*)rowDispatch)setSlot(rowSlot,(void*)rowDispatch,(void*)originalRow);
     return get<void*>(rowSlot)!=(void*)rowDispatch&&ok;
+}
+// Structural screening for nearby builds. This deliberately does not assert
+// that function bodies or private field layouts match the tested build.
+// Every check runs before the first vtable write or private function call.
+static const wchar_t*preflight(){
+    if(!readable(module,sizeof(IMAGE_DOS_HEADER)))return L"module-header-unreadable";
+    const auto*dos=(const IMAGE_DOS_HEADER*)module;
+    if(dos->e_magic!=IMAGE_DOS_SIGNATURE||dos->e_lfanew<0||dos->e_lfanew>1024*1024)return L"module-dos-header";
+    const auto*nt=(const IMAGE_NT_HEADERS64*)(module+dos->e_lfanew);
+    if(!readable(nt,sizeof(*nt))||nt->Signature!=IMAGE_NT_SIGNATURE||nt->FileHeader.Machine!=IMAGE_FILE_MACHINE_AMD64||nt->OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC)return L"module-machine";
+    const unsigned imageSize=nt->OptionalHeader.SizeOfImage;
+    const auto*sections=IMAGE_FIRST_SECTION(nt);
+    const unsigned count=nt->FileHeader.NumberOfSections;
+    if(!count||count>96||!readable(sections,count*sizeof(*sections)))return L"module-sections";
+    auto inModule=[&](const void*p,size_t bytes){auto address=(uintptr_t)p,base=(uintptr_t)module;return address>=base&&bytes<=imageSize&&address-base<=imageSize-bytes&&readable(p,bytes);};
+    auto executable=[&](const void*p){
+        if(!inModule(p,1))return false;auto rva=(uintptr_t)p-(uintptr_t)module;
+        for(unsigned i=0;i<count;i++)if((sections[i].Characteristics&IMAGE_SCN_MEM_EXECUTE)&&rva>=sections[i].VirtualAddress&&rva-sections[i].VirtualAddress<sections[i].Misc.VirtualSize)return true;
+        return false;
+    };
+    auto locator=[&](unsigned table,unsigned displacement)->const unsigned*{
+        if(table<8||!inModule(module+table-8,16))return nullptr;
+        auto*col=get<const unsigned*>(module+table-8);
+        if(!inModule(col,24)||col[0]!=1||col[1]!=displacement||col[5]!=(uintptr_t)col-(uintptr_t)module||col[3]>=imageSize)return nullptr;
+        return col;
+    };
+    for(unsigned rva:adapter::FunctionRvas)if(!executable(module+rva))return L"function-outside-executable-section";
+    for(const auto&t:objectTypes)if(!locator(t.primary,0)||!executable(get<void*>(module+t.primary)))return L"object-vtable-layout";
+    for(const auto&g:adapter::MetaGuards){
+        if(get<void*>(module+g.table)!=module+g.getter||!executable(module+g.getter)||!inModule(module+g.meta,16))return L"key-object-meta-layout";
+        auto*strings=get<unsigned char*>(module+g.meta+8);
+        if(!inModule(strings,24))return L"key-object-meta-strings";
+        int length=get<int>(strings+4);intptr_t delta=get<intptr_t>(strings+16);
+        if(length<1||length>150||delta<24||delta>imageSize)return L"key-object-meta-name";
+        auto*name=(const char*)((uintptr_t)strings+(uintptr_t)delta);
+        if(!inModule(name,length)||strlen(g.name)!=(size_t)length||memcmp(name,g.name,length))return L"key-object-meta-name";
+    }
+    for(const auto&t:paintTargets){
+        const auto*primary=locator(t.primary,0);const auto*paint=locator(t.table,adapter::PaintInterfaceOffset);
+        if(!primary||!paint||primary[3]!=paint[3])return L"paint-interface-layout";
+        if(!inModule(module+t.table+8,8)||get<void*>(module+t.table+8)!=module+t.callback||!executable(module+t.callback))return L"paint-slot-mismatch";
+    }
+    const auto*row=locator(adapter::RowSlot-8,adapter::RowInterfaceOffset);
+    const auto*primary=locator(adapter::SessionCell,0);
+    if(!row||!primary||row[3]!=primary[3]||!inModule(module+adapter::RowSlot,8)||get<void*>(module+adapter::RowSlot)!=module+adapter::RowPaint)return L"row-slot-mismatch";
+    return nullptr;
 }
 extern "C" __declspec(dllexport) void semantic_start(const wchar_t*folder){
     if(installed)return;
@@ -194,18 +241,18 @@ extern "C" __declspec(dllexport) void semantic_start(const wchar_t*folder){
     module=(unsigned char*)GetModuleHandleW(L"Weixin.dll");if(!module)return;
     if(wcslen(folder)>MAX_PATH-30)return;
     guiThread=GetCurrentThreadId();swprintf(configPath,MAX_PATH,L"%ls\\theme.ini",folder);swprintf(reportPath,MAX_PATH,L"%ls\\semantic.log",folder);swprintf(receiptPath,MAX_PATH,L"%ls\\theme.receipt",folder);
-    for(const auto&t:paintTargets){auto slot=(void**)(module+t.table+8);void*expected=module+t.callback;
-        if(get<void*>(slot)!=expected){log("slot-validation-failed",t.table);return;}}
-    auto rowSlot=(void**)(module+0x9b64d50);originalRow=(Paint)(module+0x6013f30);
-    if(get<void*>(rowSlot)!=(void*)originalRow){log("row-slot-validation-failed");return;}
+    GetPrivateProfileStringW(L"theme",L"revision",L"",revision,80,configPath);
+    if(const wchar_t*failure=preflight()){receipt(L"incompatible",failure);log("preflight-incompatible");return;}
+    auto rowSlot=(void**)(module+adapter::RowSlot);originalRow=(Paint)(module+adapter::RowPaint);
     // Fully construct the immutable lookup before another thread can enter a hook.
     if(patched.empty()){patched.reserve(sizeof(paintTargets)/sizeof(paintTargets[0]));for(const auto&t:paintTargets)patched.push_back({(void**)(module+t.table+8),module+t.callback,&t});}
     for(auto&r:patched){
-        if(!setSlot(r.slot,r.original,(void*)dispatch)){log(restoreSlots()?"install-rolled-back":"rollback-incomplete");return;}}
-    if(!setSlot(rowSlot,(void*)originalRow,(void*)rowDispatch)){log(restoreSlots()?"row-install-rolled-back":"rollback-incomplete");return;}
-    configTimer=SetTimer(nullptr,0,250,tick);if(!configTimer){log(restoreSlots()?"timer-install-rolled-back":"rollback-incomplete");return;}
+        if(!setSlot(r.slot,r.original,(void*)dispatch)){log(restoreSlots()?"install-rolled-back":"rollback-incomplete");receipt(L"incompatible",L"hook-install-failed");return;}}
+    if(!setSlot(rowSlot,(void*)originalRow,(void*)rowDispatch)){log(restoreSlots()?"row-install-rolled-back":"rollback-incomplete");receipt(L"incompatible",L"row-install-failed");return;}
+    configTimer=SetTimer(nullptr,0,250,tick);if(!configTimer){log(restoreSlots()?"timer-install-rolled-back":"rollback-incomplete");receipt(L"incompatible",L"timer-install-failed");return;}
     forceReload=true;
     installed=true;
+    receipt(L"ready");
     log("native-paint-ready",(int)patched.size());
     log("config-timer",1);
 }
@@ -214,7 +261,7 @@ extern "C" __declspec(dllexport) int semantic_stop(){
     if(GetCurrentThreadId()!=guiThread||inside)return 0;
     enabled=false;if(configTimer){KillTimer(nullptr,configTimer);configTimer=0;}
     bool restored=restoreSlots();
-    if(rootObject&&get<void*>((unsigned char*)rootObject+8)==rootIdentity&&!strcmp(typeOf(rootObject),"mmui::MainView"))((void(*)(void*))(module+0x5b7260))(rootObject);
+    if(rootObject&&get<void*>((unsigned char*)rootObject+8)==rootIdentity&&!strcmp(typeOf(rootObject),"mmui::MainView"))((void(*)(void*))(module+adapter::WidgetUpdate))(rootObject);
     releaseImage(imageAsset);imageAsset=nullptr;imagePath.clear();forceReload=true;installed=!restored;
     log(restored?"native-paint-stopped":"native-paint-disabled-restore-incomplete");return restored?1:0;
 }

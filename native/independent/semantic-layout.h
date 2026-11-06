@@ -1,4 +1,5 @@
 #pragma once
+#include "selected-adapter.h"
 #include <cstdint>
 #include <cstddef>
 namespace semantic {
@@ -18,8 +19,8 @@ inline RootLayout locateRoot(const LayoutNode*nodes,std::size_t count){
     std::int64_t x=0,y=0;bool found=false;
     for(std::size_t i=0;i<count;i++){
         const auto&n=nodes[i];if(!validGeometry(n.box))return {};
-        if(n.type==0x983c628){out.valid=found;return out;}
-        if(n.type==0x97beb48){
+        if(adapter::IsMainWindow(n.type)){out.valid=found;return out;}
+        if(n.type==adapter::MainView){
             if(n.box.width>32768||n.box.height>32768||x<-16777215||x>16777215||y<-16777215||y>16777215)return {};
             out.root=n.box;out.x=(int)x;out.y=(int)y;out.rootIndex=i;found=true;
         }
@@ -28,7 +29,7 @@ inline RootLayout locateRoot(const LayoutNode*nodes,std::size_t count){
     return {};
 }
 inline bool sessionRowPrefix(const LayoutNode*n,std::size_t count){
-    return count>=5&&n[0].type==0x9b64a88&&n[1].type==0x8ffbb98&&
-        n[2].type==0x8ffbb98&&n[3].type==0x938b3b8&&n[4].type==0x9b62c98;
+    return count>=5&&n[0].type==adapter::SessionCell&&n[1].type==adapter::Widget&&
+        n[2].type==adapter::Widget&&n[3].type==adapter::TableView&&n[4].type==adapter::SessionList;
 }
 }

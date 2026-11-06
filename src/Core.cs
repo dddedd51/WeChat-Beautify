@@ -12,6 +12,9 @@ using System.Globalization;
 
 internal sealed class TargetInfo {
     public string Exe, Dll, Version, Hash, Error;
+    public string DllVersion;
+    public ushort Machine;
+    public AdapterProfile Adapter;
     public bool Compatible;
 }
 internal static class Files {
@@ -32,7 +35,6 @@ internal static class Files {
     internal static string Get(Dictionary<string,string> d,string key) {string v;return d.TryGetValue(key,out v)?v:"";}
 }
 internal static class Weixin {
-    internal const string ExpectedHash="e0428a7b691853de496532523c2c09aa095f90941c37c9f4cfb3f137f3c66556";
     internal static TargetInfo Locate(string manual) {
         var candidates=new List<string>();if(!String.IsNullOrWhiteSpace(manual))candidates.Add(manual);
         if(String.IsNullOrWhiteSpace(manual)){
@@ -49,9 +51,13 @@ internal static class Weixin {
                 t.Version=FileVersionInfo.GetVersionInfo(path).FileVersion;
                 t.Dll=Path.Combine(Path.GetDirectoryName(t.Exe),t.Version??"","Weixin.dll");
                 if(!File.Exists(t.Dll))t.Dll=Path.Combine(Path.GetDirectoryName(t.Exe),"Weixin.dll");
-                if(t.Version!="4.1.15.56")t.Error="仅适配微信 4.1.15.56 x64，当前版本："+t.Version;
-                else if(!File.Exists(t.Dll))t.Error="没有找到对应版本的 Weixin.dll。";
-                else {t.Hash=Files.Hash(t.Dll);t.Compatible=t.Hash==ExpectedHash&&Machine(t.Dll)==0x8664;if(!t.Compatible)t.Error="微信文件与已适配版本不一致，已拒绝加载。";}
+                if(!File.Exists(t.Dll))t.Error="没有找到对应版本的 Weixin.dll。";
+                else {
+                    t.Hash=Files.Hash(t.Dll);t.Machine=Machine(t.Dll);t.DllVersion=FileVersionInfo.GetVersionInfo(t.Dll).FileVersion;
+                    if(Machine(t.Exe)!=0x8664)t.Error="请选择 64 位 Windows 微信。";
+                    else if(t.DllVersion!=t.Version)t.Error="微信启动程序与核心模块版本不一致，请完成微信更新后重新检测。";
+                    else {t.Adapter=Adapters.Resolve(t.Version,t.Machine,t.Hash,out t.Error);t.Compatible=t.Adapter!=null;}
+                }
                 if(t.Compatible)return t;failed=t;
             }catch(Exception e){failed=new TargetInfo{Exe=path,Error=e.Message};}
         }
@@ -94,79 +100,104 @@ internal static class Config {
 }
 internal static class Engine {
     internal static string LastReceipt="";
-    internal static string Runtime {get{return Path.Combine(Files.Data,"engine",RuntimeIdentity.EngineHash.Substring(0,16));}}
-    internal static string Connection(){try{if(OwnedProcess())return "自研引擎已连接";return Weixin.Count()>0?"微信运行中 · 需要用新版重新启动":"微信未运行";}catch(Exception e){return "连接检查失败："+e.Message;}}
-    internal static void ValidateRuntime(string path){ValidateFile(path,RuntimeIdentity.Hash);}
+    sealed class Session {internal int Pid;internal AdapterProfile Adapter;internal string Runtime {get{return Adapter.Runtime;}}}
+    internal static string Connection(){try{var session=OwnedSession();if(session!=null){var r=Files.ReadPairs(Path.Combine(session.Runtime,"theme.receipt"));string state=Files.Get(r,"state");if(Files.Get(r,"pid")==session.Pid.ToString()&&Files.Get(r,"protocol")=="1"){if(state=="incompatible")return "兼容性检查未通过 · 未启用主题";if(IsReady(state))return "已连接 · "+session.Adapter.Family;}return "模块已载入 · 等待引擎回执";}return Weixin.Count()>0?"微信运行中 · 需要用新版重新启动":"微信未运行";}catch(Exception e){return "连接检查失败："+e.Message;}}
+    internal static bool IsReady(string state){return state=="ready"||state=="pending"||state=="applied"||state=="disabled";}
+    internal static void ValidateRuntime(string path,AdapterProfile adapter){ValidateFile(path,adapter.EntryHash);}
     static void ValidateFile(string path,string hash){if(!File.Exists(path)||Files.Hash(path)!=hash||Weixin.Machine(path)!=0x8664)throw new IOException("主题模块校验失败，请重新构建完整应用。");}
-    static void ValidatePair(string folder){ValidateFile(Path.Combine(folder,"qttestability.dll"),RuntimeIdentity.Hash);ValidateFile(Path.Combine(folder,"beautify-engine.dll"),RuntimeIdentity.EngineHash);}
-    static int OwnedPid(){
+    internal static void ValidatePair(string folder,AdapterProfile adapter){ValidateFile(Path.Combine(folder,"qttestability.dll"),adapter.EntryHash);ValidateFile(Path.Combine(folder,"beautify-engine.dll"),adapter.EngineHash);}
+    static Session OwnedSession(){
         string error=null;
         foreach(int pid in ProcessDiscovery.Weixin()){
-            string detail;if(ProcessDiscovery.TryModule(pid,Path.Combine(Runtime,"beautify-engine.dll"),out detail))return pid;
-            if(detail!=null)error=detail;
+            foreach(var adapter in Adapters.All.Where(a=>a.CanLoad)){
+                string detail;if(ProcessDiscovery.TryModule(pid,Path.Combine(adapter.Runtime,"beautify-engine.dll"),out detail))return new Session{Pid=pid,Adapter=adapter};
+                if(detail!=null)error=detail;
+            }
         }
-        if(error!=null)throw new IOException(error);return 0;
+        if(error!=null)throw new IOException(error);return null;
     }
-    internal static bool OwnedProcess(){return OwnedPid()!=0;}
+    internal static bool OwnedProcess(){return OwnedSession()!=null;}
     internal static string Launch(GlassSettings s){
         string contextProblem=LaunchContext.Problem();if(contextProblem!=null)throw new IOException(contextProblem);
         var t=Weixin.Locate(s.Exe);if(!t.Compatible)throw new IOException(t.Error);
-        if(OwnedProcess())return "主题微信已连接，可直接更新主题。";
+        if(OwnedProcess())return Connection()+"。如检查未通过，请从托盘退出并使用原微信入口启动。";
         if(Weixin.Count()!=0)throw new IOException("请先从微信托盘菜单完全退出，再点「启动主题微信」。仅关闭窗口不会退出微信。");
-        string bundle=Path.Combine(Files.Root,"native-runtime");ValidatePair(bundle);
-        if(Runtime.Length>225)throw new IOException("应用目录过长，请将应用放在较短的路径。");
-        Directory.CreateDirectory(Runtime);
-        foreach(string name in new[]{"qttestability.dll","beautify-engine.dll"})File.Copy(Path.Combine(bundle,name),Path.Combine(Runtime,name),true);
-        ValidatePair(Runtime);string snapshot=Config.Prepare(s,true);
-        Files.Atomic(Path.Combine(Runtime,"theme.ini"),File.ReadAllText(Path.Combine(snapshot,"theme.ini")),Encoding.Unicode);LastReceipt=snapshot;
+        var adapter=t.Adapter;string bundle=adapter.Bundle(Files.Root),runtime=adapter.Runtime;ValidatePair(bundle,adapter);
+        if(runtime.Length>225)throw new IOException("应用目录过长，请将应用放在较短的路径。");
+        Directory.CreateDirectory(runtime);
+        foreach(string name in new[]{"qttestability.dll","beautify-engine.dll"})File.Copy(Path.Combine(bundle,name),Path.Combine(runtime,name),true);
+        ValidatePair(runtime,adapter);string snapshot=Config.Prepare(s,true);
+        string content=File.ReadAllText(Path.Combine(snapshot,"theme.ini")),revision=Files.Get(Files.ReadPairs(Path.Combine(snapshot,"theme.ini")),"revision");
+        string receiptFile=Path.Combine(runtime,"theme.receipt");if(File.Exists(receiptFile))File.Delete(receiptFile);
+        Files.Atomic(Path.Combine(runtime,"theme.ini"),content,Encoding.Unicode);LastReceipt=snapshot;
         s.Exe=t.Exe;s.Save();
-        var start=new ProcessStartInfo(t.Exe,"--scene=taskbarpins -testability"){UseShellExecute=false,WorkingDirectory=Runtime};
-        start.EnvironmentVariables["QT_LOAD_TESTABILITY"]="1";start.EnvironmentVariables["PATH"]=Runtime+Path.PathSeparator+(Environment.GetEnvironmentVariable("PATH")??"");
+        var start=new ProcessStartInfo(t.Exe,"--scene=taskbarpins -testability"){UseShellExecute=false,WorkingDirectory=runtime};
+        start.EnvironmentVariables["QT_LOAD_TESTABILITY"]="1";start.EnvironmentVariables["PATH"]=runtime+Path.PathSeparator+(Environment.GetEnvironmentVariable("PATH")??"");
         start.WindowStyle=ProcessWindowStyle.Normal;
         using(var p=Process.Start(start)){
             if(p==null)throw new IOException("微信启动失败。");
-            string details="utc="+DateTime.UtcNow.ToString("o")+"\npid="+p.Id+"\nworkingDirectory="+Runtime+"\nexecutable="+t.Exe+"\narguments="+start.Arguments+"\n"+LaunchContext.Diagnostic();
+            string details="utc="+DateTime.UtcNow.ToString("o")+"\npid="+p.Id+"\nworkingDirectory="+runtime+"\nexecutable="+t.Exe+"\narguments="+start.Arguments+"\nadapter="+adapter.Id+"\nfamily="+adapter.Family+"\ntargetVersion="+t.Version+"\ntargetHash="+t.Hash+"\ntestedBuild="+adapter.IsTestedBuild(t.Version,t.Hash)+"\n"+LaunchContext.Diagnostic();
             Files.Atomic(Path.Combine(Files.Data,"launch.log"),details,Encoding.UTF8);
             if(p.WaitForExit(1500)){details+="earlyExit="+p.ExitCode+"\n";Files.Atomic(Path.Combine(Files.Data,"launch.log"),details,Encoding.UTF8);}
         }
-        for(int i=0;i<80;i++){Thread.Sleep(250);if(OwnedProcess())return "自研引擎已加载。请完成登录，进入聊天主窗口后即可看到主题。";}
+        for(int i=0;i<80;i++){
+            Thread.Sleep(250);Dictionary<string,string> receipt;try{receipt=Files.ReadPairs(receiptFile);}catch(IOException){continue;}
+            if(Files.Get(receipt,"protocol")!="1"||Files.Get(receipt,"revision")!=revision)continue;
+            string state=Files.Get(receipt,"state");
+            if(state=="incompatible")throw new IOException("此微信构建未通过绘制接口兼容性检查，未启用主题。请从托盘退出，再用原微信入口启动。详情可导出诊断。");
+            var session=OwnedSession();if(session==null||session.Adapter!=adapter||Files.Get(receipt,"pid")!=session.Pid.ToString())continue;
+            if(state=="failed")throw new IOException("引擎已载入，但背景处理失败；请清除背景或恢复默认。");
+            if(IsReady(state))return "引擎已通过结构检查，请完成登录并查看聊天主窗口。"+(adapter.IsTestedBuild(t.Version,t.Hash)?"":" 当前小版本未经实测；显示异常请恢复默认，无法操作时从托盘退出后用原微信入口启动。");
+        }
         throw new IOException("微信已收到启动请求，但还没有确认引擎加载。请查看微信窗口或导出诊断。");
     }
     internal static async Task<string> Update(GlassSettings s,bool enabled){
-        int pid=OwnedPid();
-        if(pid==0){
+        var session=OwnedSession();
+        if(session==null){
             if(enabled)throw new IOException("尚未连接新版主题微信。请从托盘退出微信，再用本客户端启动。");
             return "当前没有本客户端的主题会话。普通微信无需恢复；旧测试会话请退出后重新启动。";
         }
-        ValidatePair(Runtime);
+        int pid=session.Pid;string runtime=session.Runtime;
+        ValidatePair(runtime,session.Adapter);
+        var current=Files.ReadPairs(Path.Combine(runtime,"theme.receipt"));
+        if(Files.Get(current,"pid")==pid.ToString()&&Files.Get(current,"state")=="incompatible"){
+            if(enabled)throw new IOException("此构建未通过兼容性检查，不能启用主题。");
+            return "兼容性检查未通过，主题未启用；请从托盘退出，再用原微信入口启动。";
+        }
         string snapshot=await Task.Run(()=>Config.Prepare(s,enabled));
-        string config=Path.Combine(Runtime,"theme.ini"),previous=File.Exists(config)?File.ReadAllText(config):Config.Build(s,false);
+        string config=Path.Combine(runtime,"theme.ini"),previous=File.Exists(config)?File.ReadAllText(config):Config.Build(s,false);
         string content=File.ReadAllText(Path.Combine(snapshot,"theme.ini")),revision=Files.Get(Files.ReadPairs(Path.Combine(snapshot,"theme.ini")),"revision");
         Files.Atomic(config,content,Encoding.Unicode);LastReceipt=snapshot;
         try{
             for(int i=0;i<50;i++){
                 await Task.Delay(200);Dictionary<string,string> r;
-                try{r=Files.ReadPairs(Path.Combine(Runtime,"theme.receipt"));}catch(IOException){continue;}
-                if(Files.Get(r,"revision")!=revision||Files.Get(r,"pid")!=pid.ToString())continue;
+                try{r=Files.ReadPairs(Path.Combine(runtime,"theme.receipt"));}catch(IOException){continue;}
+                if(Files.Get(r,"protocol")!="1"||Files.Get(r,"revision")!=revision||Files.Get(r,"pid")!=pid.ToString())continue;
                 string state=Files.Get(r,"state");
                 if(state=="failed")throw new IOException("背景解码失败。");
                 if(state==(enabled?"applied":"disabled")){
                     if(enabled&&!String.IsNullOrEmpty(s.Wallpaper)&&Files.Get(r,"wallLoaded")!="1")throw new IOException("微信没有确认图片加载。");
-                    s.Save();File.Copy(Path.Combine(Runtime,"theme.receipt"),Path.Combine(snapshot,"theme.receipt"),true);
+                    s.Save();File.Copy(Path.Combine(runtime,"theme.receipt"),Path.Combine(snapshot,"theme.receipt"),true);
                     return enabled?"微信已读取这次主题，并开始原生绘制。请查看实际效果。":"已恢复微信默认外观；从托盘退出后引擎完全卸载。";
                 }
             }
-            throw new IOException("尚未收到这次主题的绘制回执。请登录并保持聊天主窗口可见。");
+            throw new IOException(enabled?"尚未收到这次主题的绘制回执。请登录并保持聊天主窗口可见。":"已写入停用配置，但尚未确认恢复。请从托盘退出微信，再用原微信入口启动。");
         }catch{
-            Files.Atomic(config,previous,Encoding.Unicode);throw;
+            // A failed recovery must never restore the enabled configuration.
+            if(enabled)Files.Atomic(config,previous,Encoding.Unicode);throw;
         }
     }
     internal static string Diagnosis(TargetInfo t){
-        var b=new StringBuilder("微信美化 0.5 / independent native paint\n");
-        b.AppendLine("UTC="+DateTime.UtcNow.ToString("o")).AppendLine("Version="+t?.Version).AppendLine("SHA256="+t?.Hash).AppendLine("Connection="+Connection()).AppendLine("EntryHash="+RuntimeIdentity.Hash).AppendLine("EngineHash="+RuntimeIdentity.EngineHash);
+        var b=new StringBuilder("微信美化 0.6 / version family adapters\n");
+        b.AppendLine("UTC="+DateTime.UtcNow.ToString("o")).AppendLine("Version="+t?.Version).AppendLine("DllVersion="+t?.DllVersion).AppendLine("Machine="+t?.Machine.ToString("x")).AppendLine("SHA256="+t?.Hash).AppendLine("Adapter="+t?.Adapter?.Id).AppendLine("TestedBuild="+(t?.Adapter?.IsTestedBuild(t.Version,t.Hash)??false)).AppendLine("DetectionError="+t?.Error).AppendLine("Connection="+Connection());
         b.Append(ProcessDiscovery.Diagnostic());
         b.Append(LaunchContext.Diagnostic());
-        string file=Path.Combine(Runtime,"theme.receipt");if(File.Exists(file))b.AppendLine(File.ReadAllText(file));
+        foreach(var adapter in Adapters.All){
+            b.AppendLine("AdapterProfile="+adapter.Id+" / "+adapter.Status+" / family="+adapter.Family+" / reference="+adapter.TargetHash);
+            if(!adapter.CanLoad)continue;
+            b.AppendLine("EntryHash="+adapter.EntryHash).AppendLine("EngineHash="+adapter.EngineHash);
+            string file=Path.Combine(adapter.Runtime,"theme.receipt");if(File.Exists(file))b.AppendLine(File.ReadAllText(file));
+        }
         return b.ToString();
     }
 }
