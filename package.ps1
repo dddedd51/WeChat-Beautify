@@ -1,4 +1,4 @@
-param([string]$Version='0.7.0-preview.1',[string]$BuiltDirectory='',[string]$ValidationDirectory='')
+param([string]$Version='0.7.1-preview.1',[string]$BuiltDirectory='',[string]$ValidationDirectory='')
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$'){throw 'Invalid version'}
 $stage=if($BuiltDirectory){[IO.Path]::GetFullPath($BuiltDirectory)}else{Join-Path $PSScriptRoot ('research/package-'+[guid]::NewGuid().ToString('N'))}

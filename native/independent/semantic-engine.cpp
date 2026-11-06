@@ -10,6 +10,7 @@
 #include <algorithm>
 #include "semantic-policy.h"
 #include "semantic-layout.h"
+#include "semantic-lookup.h"
 #include "selected-adapter.h"
 #include BEAUTIFY_PAINT_HEADER
 static unsigned char*module;
@@ -33,7 +34,13 @@ static unsigned colors[4]={0xffd3e6e0,0xffe7edf7,0xfff2eff7,0xffe0efe8};
 static int opacity[4]={35,20,10,35};
 static unsigned primaryText=0xff1c2128,secondaryText=0xff414a56;
 static unsigned selectionColor=0xff39c5bb,selectedText=0xff103b3a;
+#ifdef BEAUTIFY_TESTING
+static unsigned memoryChecks;
+#endif
 static bool readable(const void*p,size_t length){
+#ifdef BEAUTIFY_TESTING
+    ++memoryChecks;
+#endif
     auto at=(uintptr_t)p;if(!at||at+length<at)return false;MEMORY_BASIC_INFORMATION m;
     return VirtualQuery(p,&m,sizeof m)&&m.State==MEM_COMMIT&&!(m.Protect&(PAGE_NOACCESS|PAGE_GUARD))&&at+length<=(uintptr_t)m.BaseAddress+m.RegionSize;
 }
@@ -50,26 +57,49 @@ static Paint originalRow;
 static bool installed;
 struct Patched {void**slot;void*original;const PaintTarget*target;unsigned observed=0;};
 static std::vector<Patched>patched;
-static const char*typeOf(void*object){auto table=get<uintptr_t>(object);if(table<(uintptr_t)module)return "unknown";unsigned rva=(unsigned)(table-(uintptr_t)module);for(const auto&t:objectTypes)if(t.primary==rva)return t.name;return "unknown";}
-static void*parentOf(void*object){auto data=get<unsigned char*>((unsigned char*)object+adapter::ObjectDataOffset);return data?get<void*>(data+adapter::ParentOffset):nullptr;}
+static const ObjectType*typeFor(uintptr_t table){
+    if(table<(uintptr_t)module||table-(uintptr_t)module>UINT32_MAX)return nullptr;
+    return semantic::findSorted(objectTypes,std::size(objectTypes),table-(uintptr_t)module,[](const ObjectType&t){return t.primary;});
+}
+static const char*typeOf(void*object){auto*t=typeFor(get<uintptr_t>(object));return t?t->name:"unknown";}
 using Geometry=semantic::Geometry;
-static bool geometry(void*object,Geometry&g){auto d=get<unsigned char*>((unsigned char*)object+adapter::WidgetDataOffset);if(!readable(d,adapter::GeometryBottom+sizeof(int)))return false;g.x=get<int>(d+adapter::GeometryX);g.y=get<int>(d+adapter::GeometryY);int64_t w=(int64_t)get<int>(d+adapter::GeometryRight)-g.x+1,h=(int64_t)get<int>(d+adapter::GeometryBottom)-g.y+1;if(w<=0||h<=0||w>16777215||h>16777215)return false;g.width=(int)w;g.height=(int)h;return semantic::validGeometry(g);}
+struct NodeSnapshot {const ObjectType*type=nullptr;void*parent=nullptr;Geometry box{};};
+static bool snapshotNode(void*object,NodeSnapshot&out){
+    // Read each validated memory span once, not VirtualQuery for every field.
+    // These pointers/coordinates live only for this synchronous parent walk;
+    // no retained widget cache can go stale after scrolling or destruction.
+    auto*p=(unsigned char*)object;
+    if(!readable(p,adapter::WidgetDataOffset+sizeof(void*)))return false;
+    auto*t=typeFor(*(uintptr_t*)p);if(!t||semantic::protectedBranch(t->name))return false;
+    auto*d=*(unsigned char**)(p+adapter::WidgetDataOffset);
+    if(!readable(d,adapter::GeometryBottom+sizeof(int)))return false;
+    Geometry g;g.x=*(int*)(d+adapter::GeometryX);g.y=*(int*)(d+adapter::GeometryY);
+    int64_t w=(int64_t)*(int*)(d+adapter::GeometryRight)-g.x+1,h=(int64_t)*(int*)(d+adapter::GeometryBottom)-g.y+1;
+    if(w<=0||h<=0||w>16777215||h>16777215)return false;g.width=(int)w;g.height=(int)h;
+    if(!semantic::validGeometry(g))return false;
+    out.type=t;out.box=g;out.parent=nullptr;
+    if(!adapter::IsMainWindow(t->primary)){
+        auto*data=*(unsigned char**)(p+adapter::ObjectDataOffset);
+        if(!readable(data,adapter::ParentOffset+sizeof(void*)))return false;
+        out.parent=*(void**)(data+adapter::ParentOffset);
+    }
+    return true;
+}
 struct Location {Geometry local{},root{};int x=0,y=0;void*rootObject=nullptr;void*rowObject=nullptr;semantic::Region region=semantic::Region::Base;bool valid=false,rowPath=false,rowText=false;};
 static Location locate(void*object){
     Location l;semantic::LayoutNode nodes[48]{};void*objects[48]{};size_t count=0;
     void*node=object;for(int depth=0;node&&depth<48;depth++){
-        const char*name=typeOf(node);if(!strcmp(name,"unknown")||semantic::protectedBranch(name))return l;
-        auto role=semantic::classify(name);
+        NodeSnapshot snapshot;if(!snapshotNode(node,snapshot))return l;
+        auto role=semantic::classify(snapshot.type->name);
         if(l.region==semantic::Region::Base&&role!=semantic::Region::Base&&role!=semantic::Region::Preserve)l.region=role;
-        Geometry g;if(!geometry(node,g))return l;
-        nodes[count]={(unsigned)(get<uintptr_t>(node)-(uintptr_t)module),g};objects[count++]=node;
+        nodes[count]={snapshot.type->primary,snapshot.box};objects[count++]=node;
         if(adapter::IsMainWindow(nodes[count-1].type)){
             auto layout=semantic::locateRoot(nodes,count);l.local=layout.local;l.root=layout.root;l.x=layout.x;l.y=layout.y;l.valid=layout.valid;if(l.valid)l.rootObject=objects[layout.rootIndex];l.rowPath=semantic::sessionRowPrefix(nodes,count);
             // Observed label -> QWidget -> QWidget -> label container -> row.
             l.rowText=count>=9&&(nodes[0].type==adapter::PrimaryText||nodes[0].type==adapter::TextView)&&nodes[1].type==adapter::Widget&&nodes[2].type==adapter::Widget&&nodes[3].type==adapter::LabelContainer&&semantic::sessionRowPrefix(nodes+4,count-4);
             if(l.rowText)l.rowObject=objects[4];return l;
         }
-        void*next=parentOf(node);if(next==node)return l;node=next;
+        void*next=snapshot.parent;if(next==node)return l;node=next;
     }
     return l;
 }
@@ -155,15 +185,15 @@ static uintptr_t rowDispatch(void*self,void*canvas){
     inside=false;return changed?0:originalRow(self,canvas);
 }
 static uintptr_t dispatch(void*self,void*canvas){
-    auto table=get<void**>(self);if(!table)return 0;Patched*entry=nullptr;for(auto&r:patched)if(r.slot==table+1){entry=&r;break;}if(!entry)return 0;
+    auto table=get<void**>(self);if(!table)return 0;
+    auto*entry=semantic::findSorted(patched.data(),patched.size(),(uintptr_t)(table+1),[](const Patched&p){return (uintptr_t)p.slot;});if(!entry)return 0;
     auto original=(Paint)entry->original;
-    if(inside||GetCurrentThreadId()!=guiThread)return original(self,canvas);
+    if(inside||GetCurrentThreadId()!=guiThread||(!enabled&&!pendingReceipt)||semantic::protectedBranch(entry->target->name))return original(self,canvas);
     inside=true;void*object=(unsigned char*)self-adapter::PaintInterfaceOffset;Location l=locate(object);
     bool changed=false;
     try{
         if(l.valid){rootObject=l.rootObject;rootIdentity=get<void*>((unsigned char*)rootObject+8);}
         if(l.valid&&pendingReceipt){pendingReceipt=false;receipt(enabled?L"applied":L"disabled");}
-        if(entry->observed++==0){log(entry->target->name,l.valid,l.local.width);}
         if(enabled&&l.valid&&l.rowText&&entry->target->callback==adapter::TextPaint&&canColor(object)){
             unsigned saved=get<unsigned>((unsigned char*)object+adapter::TextColorOffset),desired=get<unsigned char>((unsigned char*)l.rowObject+adapter::RowSelectedOffset)==1?selectedText:entry->target->primary==adapter::PrimaryText?primaryText:secondaryText;
             auto setter=paintColor;
@@ -176,7 +206,8 @@ static uintptr_t dispatch(void*self,void*canvas){
         bool custom=get<void*>((unsigned char*)object+adapter::CustomPaintOffset)!=nullptr;
         bool namedRegion=l.region!=semantic::Region::Base||!strcmp(entry->target->name,"mmui::MainView");
         if(enabled&&l.valid&&namedRegion&&!custom&&entry->target->callback!=adapter::TextPaint&&semantic::classify(entry->target->name)!=semantic::Region::Preserve)changed=render(canvas,l);
-        if(changed&&++paintCount%240==1)log("native-background",(int)paintCount,l.local.width);
+        // No synchronous open/write/close of semantic.log in the scroll path.
+        if(changed)++paintCount;
     }catch(...){enabled=false;log("exception-disabled");}
     inside=false;return changed?0:original(self,canvas);
 }
@@ -193,6 +224,7 @@ static bool restoreSlots(){
 // that function bodies or private field layouts match the tested build.
 // Every check runs before the first vtable write or private function call.
 static const wchar_t*preflight(){
+    if(!semantic::strictlySorted(objectTypes,std::size(objectTypes),[](const ObjectType&t){return t.primary;}))return L"object-table-order";
     if(!readable(module,sizeof(IMAGE_DOS_HEADER)))return L"module-header-unreadable";
     const auto*dos=(const IMAGE_DOS_HEADER*)module;
     if(dos->e_magic!=IMAGE_DOS_SIGNATURE||dos->e_lfanew<0||dos->e_lfanew>1024*1024)return L"module-dos-header";
@@ -245,7 +277,7 @@ extern "C" __declspec(dllexport) void semantic_start(const wchar_t*folder){
     if(const wchar_t*failure=preflight()){receipt(L"incompatible",failure);log("preflight-incompatible");return;}
     auto rowSlot=(void**)(module+adapter::RowSlot);originalRow=(Paint)(module+adapter::RowPaint);
     // Fully construct the immutable lookup before another thread can enter a hook.
-    if(patched.empty()){patched.reserve(sizeof(paintTargets)/sizeof(paintTargets[0]));for(const auto&t:paintTargets)patched.push_back({(void**)(module+t.table+8),module+t.callback,&t});}
+    if(patched.empty()){patched.reserve(sizeof(paintTargets)/sizeof(paintTargets[0]));for(const auto&t:paintTargets)patched.push_back({(void**)(module+t.table+8),module+t.callback,&t});std::sort(patched.begin(),patched.end(),[](const Patched&a,const Patched&b){return (uintptr_t)a.slot<(uintptr_t)b.slot;});}
     for(auto&r:patched){
         if(!setSlot(r.slot,r.original,(void*)dispatch)){log(restoreSlots()?"install-rolled-back":"rollback-incomplete");receipt(L"incompatible",L"hook-install-failed");return;}}
     if(!setSlot(rowSlot,(void*)originalRow,(void*)rowDispatch)){log(restoreSlots()?"row-install-rolled-back":"rollback-incomplete");receipt(L"incompatible",L"row-install-failed");return;}

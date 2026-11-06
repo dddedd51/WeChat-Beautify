@@ -83,7 +83,7 @@ internal sealed class Controller {
         foreach(string p in new[]{"Theme","Background","Colors"})Find<StackPanel>(p+"Page").Visibility=page==p?Visibility.Visible:Visibility.Collapsed;
         Find<TextBlock>("PageTitle").Text=page=="Background"?"把喜欢的风景，放进对话":page=="Colors"?"每一处，都有自己的颜色":page=="Guide"?"从这里开始，轻松换装":"给微信一点自己的颜色";
     }
-    void OpenLink(string url){try{System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url){UseShellExecute=true});SetStatus("已在浏览器打开。当前客户端：0.7.0-preview.1；请在 Releases 核对最新版本。",false);}catch(Exception e){SetStatus("无法打开浏览器："+e.Message,true);}}
+    void OpenLink(string url){try{System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url){UseShellExecute=true});SetStatus("已在浏览器打开。当前客户端：0.7.1-preview.1；请在 Releases 核对最新版本。",false);}catch(Exception e){SetStatus("无法打开浏览器："+e.Message,true);}}
     void ShowShadeUndo(){Find<Button>("UndoContrast").Visibility=shadeUndo.Available?Visibility.Visible:Visibility.Collapsed;}
     void ClearShadeUndo(){shadeUndo.Clear();ShowShadeUndo();}
     void BeginComposition(string path,string name,Rect crop){

@@ -1,7 +1,37 @@
 // Synthetic PE metadata only: no WeChat process, code execution or hook writes.
+#define BEAUTIFY_TESTING
 #include "semantic-engine.cpp"
 #include <cassert>
 #include <set>
+#include <array>
+struct FakeWidget {
+    alignas(8) unsigned char object[0x400]{},data[0x40]{},widget[0x40]{};
+    void init(unsigned type,FakeWidget*parent,Geometry box){
+        *(void**)object=module+type;*(void**)(object+adapter::ObjectDataOffset)=data;*(void**)(object+adapter::WidgetDataOffset)=widget;
+        *(void**)(data+adapter::ParentOffset)=parent?parent->object:nullptr;
+        *(int*)(widget+adapter::GeometryX)=box.x;*(int*)(widget+adapter::GeometryY)=box.y;
+        *(int*)(widget+adapter::GeometryRight)=box.x+box.width-1;*(int*)(widget+adapter::GeometryBottom)=box.y+box.height-1;
+    }
+};
+static void testTraversal(){
+    for(const auto&t:objectTypes)assert(typeFor((uintptr_t)(module+t.primary))==&t);
+    assert(!typeFor((uintptr_t)module-1)&&!typeFor((uintptr_t)module+UINT64_C(0x100000000)+objectTypes[0].primary));
+    FakeWidget window,outer,host,inner,list,table,viewport,content,row,label;
+    window.init(adapter::MainWindow,nullptr,{859,201,826,730});outer.init(adapter::MainView,&window,{0,0,826,730});host.init(adapter::Widget,&outer,{60,0,766,730});inner.init(adapter::MainView,&host,{0,32,762,694});
+    list.init(adapter::SessionList,&inner,{0,48,189,646});table.init(adapter::TableView,&list,{0,0,189,646});viewport.init(adapter::Widget,&table,{0,0,189,646});content.init(adapter::Widget,&viewport,{0,-130,189,17160});row.init(adapter::SessionCell,&content,{0,325,189,65});
+    memoryChecks=0;auto l=locate(row.object);assert(l.valid&&l.rowPath&&l.rootObject==outer.object&&l.x==60&&l.y==275);
+    assert(memoryChecks==26); // 3 validated spans per ancestor; no per-field re-query.
+    printf("PASS: nine-node scrolling row requires %u memory checks (previous traversal required 88)\n",memoryChecks);
+    // Geometry is read again on every call, including a recycled scrolling row.
+    content.init(adapter::Widget,&viewport,{0,-195,189,17160});assert(locate(row.object).y==210);
+    unsigned contact=0;for(const auto&t:objectTypes)if(!strcmp(t.name,"mmui::ContactsTableBaseView")){contact=t.primary;break;}assert(contact);
+    list.init(contact,&inner,{0,48,189,646});label.init(paintTargets[0].primary,&row,{30,0,130,20});
+    assert(!locate(label.object).valid&&!locate(list.object).valid);
+    list.init(adapter::SessionList,&inner,{0,48,189,646});assert(locate(row.object).valid);
+    *(void**)(content.object+adapter::WidgetDataOffset)=nullptr;assert(!locate(row.object).valid);
+    content.init(adapter::Widget,&content,{0,-130,189,17160});assert(!locate(row.object).valid);
+    puts("PASS: actual locator uses fresh geometry, protects contacts descendants, and rejects invalid pointers/cycles");
+}
 int main(){
     constexpr unsigned imageSize=0x0b000000,colStart=0x0a800000;
     auto*memory=(unsigned char*)VirtualAlloc(nullptr,imageSize,MEM_RESERVE,PAGE_READWRITE);assert(memory);
@@ -40,6 +70,6 @@ int main(){
     section->Characteristics=IMAGE_SCN_MEM_READ;
     assert(!wcscmp(preflight(),L"function-outside-executable-section"));section->Characteristics|=IMAGE_SCN_MEM_EXECUTE;
     nt->FileHeader.Machine=IMAGE_FILE_MACHINE_I386;assert(!wcscmp(preflight(),L"module-machine"));nt->FileHeader.Machine=IMAGE_FILE_MACHINE_AMD64;
-    assert(preflight()==nullptr);VirtualFree(memory,0,MEM_RELEASE);module=nullptr;
+    assert(preflight()==nullptr);testTraversal();VirtualFree(memory,0,MEM_RELEASE);module=nullptr;
     puts("PASS: structural preflight accepts coherent fixtures; rejects machine, function, vtable, interface, paint and row mismatches without writes");
 }
