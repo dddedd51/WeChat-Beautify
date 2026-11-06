@@ -1,0 +1,186 @@
+using System;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Documents;
+using System.Windows.Interop;
+using System.Windows.Markup;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+using Microsoft.Win32;
+
+internal static class App {
+    [STAThread]static int Main(string[] args){
+        try{
+            if(args.Length>0&&args[0]=="--diagnose"){Directory.CreateDirectory(Files.Data);File.WriteAllText(Path.Combine(Files.Data,"diagnose.txt"),Engine.Diagnosis(Weixin.Locate(null)));return 0;}
+            if(args.Length>0&&args[0]=="--self-test")return SelfTest.Run(args.Length>1?args[1]:Path.Combine(Files.Root,"self-test"));
+            bool first;using(var mutex=new Mutex(true,"Local\\WeChatLiuliController",out first)){
+                if(!first){MessageBox.Show("微信美化已经打开。","微信美化");return 0;}
+                var app=new Application();app.DispatcherUnhandledException+=(s,e)=>{MessageBox.Show(e.Exception.Message,"微信美化",MessageBoxButton.OK,MessageBoxImage.Warning);e.Handled=true;};
+                var controller=new Controller();app.Run(controller.Window);return 0;
+            }
+        }catch(Exception e){if(args.Length>0)File.WriteAllText(Path.Combine(Files.Root,"self-test-error.txt"),e.ToString());else MessageBox.Show(e.Message,"微信美化");return 1;}
+    }
+}
+internal sealed class Controller {
+    internal Window Window;
+    GlassSettings settings;TargetInfo target;bool busy,initialized;string manual;
+    DispatcherTimer previewTimer=new DispatcherTimer();int previewGeneration;bool previewRunning,previewPending;
+    int recommendedShade=-1;readonly PalettePreview palettePreview=new PalettePreview();
+    T Find<T>(string name)where T:class{return Window.FindName(name)as T;}
+    internal static Window LoadWindow(){using(var s=Assembly.GetExecutingAssembly().GetManifestResourceStream("MainWindow.xaml"))return (Window)XamlReader.Load(s);}
+    internal Controller(){
+        Window=LoadWindow();settings=GlassSettings.Load();manual=settings.Exe;
+        Find<Border>("Preview").Child=palettePreview;palettePreview.Cursor=System.Windows.Input.Cursors.Hand;palettePreview.Pick+=OpenColors;Find<Button>("EditColors").Click+=(s,e)=>OpenColors(null);
+        Find<Slider>("Density").Value=settings.Density;Find<CheckBox>("Dark").IsChecked=settings.Dark;
+        Find<Slider>("ImageBlur").Value=settings.Blur;Find<Slider>("ImageShade").Value=settings.Shade;
+        previewTimer.Interval=TimeSpan.FromMilliseconds(250);previewTimer.Tick+=async(s,e)=>{previewTimer.Stop();await RenderWallpaper();};
+        Find<Slider>("ImageBlur").ValueChanged+=(s,e)=>Preview();Find<Slider>("ImageShade").ValueChanged+=(s,e)=>Preview();
+        Find<Button>("ChooseImage").Click+=async(s,e)=>{
+            var d=new OpenFileDialog{Title="选择微信背景图片",Filter="图片|*.png;*.jpg;*.jpeg;*.bmp",CheckFileExists=true};
+            if(d.ShowDialog(Window)==true)await Work(async()=>{string path=await Task.Run(()=>Wallpaper.Import(d.FileName));var crop=new CropWindow(Window,path,new Rect(0,0,1,1),PreviewRatio());if(crop.ShowDialog()!=true)return;settings.Wallpaper=path;settings.WallpaperName=Path.GetFileName(d.FileName);settings.SetCrop(crop.Result);Read().Save();Preview();SetStatus("背景和裁剪已保存。点击「更新主题」应用到已连接的微信。",false);});
+        };
+        Find<Button>("CropImage").Click+=(s,e)=>{try{var crop=new CropWindow(Window,settings.Wallpaper,settings.Crop,PreviewRatio());if(crop.ShowDialog()==true){settings.SetCrop(crop.Result);Read().Save();Preview();SetStatus("裁剪已保存。点击「更新主题」应用到微信。",false);}}catch(Exception ex){SetStatus(ex.Message,true);}};
+        Find<Button>("ImproveContrast").Click+=(s,e)=>{if(recommendedShade>=0){Find<Slider>("ImageShade").Value=recommendedShade;Read().Save();}};
+        Find<Button>("ClearImage").Click+=(s,e)=>{settings.Wallpaper="";settings.WallpaperName="";Read().Save();Preview();SetStatus("已清除背景选择，返回系统毛玻璃预览。点击「更新主题」应用。",false);};
+        Find<Slider>("Density").ValueChanged+=(s,e)=>Preview();Find<CheckBox>("Dark").Checked+=(s,e)=>Preview();Find<CheckBox>("Dark").Unchecked+=(s,e)=>Preview();
+        Find<Button>("Blue").Click+=(s,e)=>Accent("#78AAE0","雾蓝");Find<Button>("Green").Click+=(s,e)=>Accent("#65B5A1","青玉");Find<Button>("Purple").Click+=(s,e)=>Accent("#A094D9","鸢尾");
+        Find<Button>("Detect").Click+=async(s,e)=>await Detect();
+        Find<Button>("Choose").Click+=async(s,e)=>{var d=new OpenFileDialog{Title="选择微信 Weixin.exe",Filter="微信程序|Weixin.exe",CheckFileExists=true};if(d.ShowDialog(Window)==true){manual=d.FileName;await Detect();}};
+        Find<Button>("Launch").Click+=async(s,e)=>await Work(async()=>{var state=Read();SetStatus(await Task.Run(()=>Engine.Launch(state)),false);});
+        Find<Button>("Apply").Click+=async(s,e)=>await Work(async()=>SetStatus(await Engine.Update(Read(),true),false));
+        Find<Button>("Restore").Click+=async(s,e)=>await Work(async()=>SetStatus(await Engine.Update(Read(),false),false));
+        Find<Button>("Report").Click+=(s,e)=>{var d=new SaveFileDialog{FileName="微信美化诊断.txt",Filter="文本|*.txt"};if(d.ShowDialog(Window)==true){File.WriteAllText(d.FileName,Engine.Diagnosis(target),Encoding.UTF8);SetStatus("诊断已导出，不包含聊天内容；包含本机路径。",false);}};
+        Window.SourceInitialized+=(s,e)=>{OwnMaterial.Apply(Window,settings.Dark,settings.Density);};
+        Window.Loaded+=async(s,e)=>{initialized=true;Preview();await Detect();};
+        Window.Closing+=(s,e)=>{if(busy){e.Cancel=true;SetStatus("请等待当前操作完成后关闭。",false);return;}previewTimer.Stop();previewGeneration++;initialized=false;try{Read().Save();}catch{}};
+    }
+    double PreviewRatio(){return 760d/400;}
+    GlassSettings Read(){return new GlassSettings{Density=(int)Find<Slider>("Density").Value,Dark=Find<CheckBox>("Dark").IsChecked==true,Accent=settings.Accent,Exe=manual??"",Wallpaper=settings.Wallpaper,WallpaperName=settings.WallpaperName,Blur=(int)Find<Slider>("ImageBlur").Value,Shade=(int)Find<Slider>("ImageShade").Value,CropX=settings.CropX,CropY=settings.CropY,CropW=settings.CropW,CropH=settings.CropH,Colors=settings.Colors.Copy()};}
+    void OpenColors(string key){if(busy)return;var editor=new ColorsWindow(Window,Read(),previewBitmap,key);if(editor.ShowDialog()==true){settings.Colors=editor.Result;Read().Save();Preview();SetStatus("分区配色已保存。点击「更新主题」应用到微信。",false);}}
+    BitmapSource previewBitmap;
+    void Accent(string color,string name){settings.Accent=color;Find<TextBlock>("AccentLabel").Text="当前："+name;Preview();}
+    void Preview(){
+        if(!initialized)return;var s=Read();Find<TextBlock>("DensityLabel").Text=s.Density+"%";
+        bool hasImage=!String.IsNullOrEmpty(s.Wallpaper);Find<TextBlock>("BlurLabel").Text=s.Blur.ToString();Find<TextBlock>("ShadeLabel").Text=s.Shade+"%";
+        Find<TextBlock>("ImageName").Text=hasImage?(s.WallpaperName.Length>0?s.WallpaperName:"已保存的背景图"):"未选择图片 · 使用系统毛玻璃";
+        Find<TextBlock>("ImageName").ToolTip=Find<TextBlock>("ImageName").Text;Find<StackPanel>("ImageEffects").IsEnabled=hasImage;Find<Slider>("Density").IsEnabled=!hasImage;
+        Find<Button>("ClearImage").IsEnabled=hasImage&&!busy;
+        Find<Button>("CropImage").IsEnabled=hasImage&&!busy;
+        Find<TextBlock>("ModeDescription").Text=hasImage?"自定义图片模式。清除背景可使用系统毛玻璃。":"无背景图时，使用系统毛玻璃。";
+        OwnMaterial.Apply(Window,s.Dark,s.Density);
+        Find<TextBlock>("MaterialLabel").Text=(hasImage?"自定义背景":s.Dark?"深色材质":"浅色材质")+" · 示意布局";
+        palettePreview.Update(s,previewBitmap);
+        Find<TextBlock>("AccentLabel").Text="当前："+(s.Accent=="#65B5A1"?"青玉":s.Accent=="#A094D9"?"鸢尾":"雾蓝");
+        recommendedShade=-1;Find<Button>("ImproveContrast").IsEnabled=false;
+        previewGeneration++;previewTimer.Stop();if(hasImage){Find<TextBlock>("ContrastSummary").Text="正在检查文字对比…";previewTimer.Start();}else{previewBitmap=null;palettePreview.Update(Read(),null);ShowContrast(Readability.Analyze(s));}
+    }
+    async Task RenderWallpaper(){
+        if(previewRunning){previewPending=true;return;}previewRunning=true;int generation=previewGeneration;var state=Read();
+        try{var result=await Task.Run(()=>Tuple.Create(Wallpaper.Process(state),Readability.Analyze(state)));string file=result.Item1;if(generation!=previewGeneration||!initialized||String.IsNullOrEmpty(file))return;
+            var image=new BitmapImage();image.BeginInit();image.CacheOption=BitmapCacheOption.OnLoad;image.UriSource=new Uri(file);image.EndInit();image.Freeze();previewBitmap=image;palettePreview.Update(state,image);
+            ShowContrast(result.Item2);
+        }catch(Exception e){if(generation==previewGeneration){previewBitmap=null;palettePreview.Update(Read(),null);SetStatus("背景预览失败："+e.Message,true);}}
+        finally{previewRunning=false;if(initialized&&(previewPending||generation!=previewGeneration)){previewPending=false;previewTimer.Start();}}
+    }
+    void ShowContrast(ContrastReport report){recommendedShade=report.RecommendedShade;Find<TextBlock>("ContrastSummary").Text=report.Summary;Find<TextBlock>("ContrastDetails").Text=report.Details;Find<TextBlock>("ContrastSummary").Foreground=report.Pass?Brushes.LightGreen:Brushes.LightGoldenrodYellow;Find<Button>("ImproveContrast").IsEnabled=recommendedShade>=0&&!busy;}
+    async Task Detect(){await Work(async()=>{target=await Task.Run(()=>Weixin.Locate(manual));if(target.Compatible){manual=target.Exe;Find<TextBlock>("Detection").Text="✓  文件校验一致\n微信 "+target.Version;SetStatus(Weixin.Count()>0?"微信正在运行。首次启用请先从托盘退出微信；当前会话不会被强制关闭。":"微信版本兼容。可启动实验性毛玻璃模式。",false);}else{Find<TextBlock>("Detection").Text="尚未就绪";SetStatus(target.Error,true);}});}
+    async Task Work(Func<Task> action){if(busy)return;busy=true;Toggle(false);SetStatus("正在处理，请稍候…",false);try{await action();}catch(Exception e){SetStatus(e.Message,true);}finally{busy=false;Toggle(true);}Find<TextBlock>("Connection").Text=await Task.Run(()=>Engine.Connection());}
+    void Toggle(bool enabled){foreach(string name in new[]{"Launch","Apply","Restore","Detect","Choose","Report","ChooseImage","ClearImage","CropImage","EditColors"})Find<Button>(name).IsEnabled=enabled;Find<Button>("ClearImage").IsEnabled=Find<Button>("CropImage").IsEnabled=enabled&&!String.IsNullOrEmpty(settings.Wallpaper);Find<Button>("ImproveContrast").IsEnabled=enabled&&recommendedShade>=0;}
+    void SetStatus(string text,bool error){var label=Find<TextBlock>("Status");label.Text=text;label.Foreground=new SolidColorBrush(error?Color.FromRgb(255,185,159):Color.FromRgb(170,192,218));}
+}
+internal static class OwnMaterial {
+    [StructLayout(LayoutKind.Sequential)]struct Accent{public int State,Flags;public uint Color;public int Animation;}
+    [StructLayout(LayoutKind.Sequential)]struct Composition{public int Attribute;public IntPtr Data;public int Size;}
+    [StructLayout(LayoutKind.Sequential)]struct Margins{public int L,R,T,B;}
+    [DllImport("user32.dll")]static extern bool SetWindowCompositionAttribute(IntPtr hwnd,ref Composition data);
+    [DllImport("dwmapi.dll")]static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd,ref Margins margins);
+    [DllImport("dwmapi.dll")]static extern int DwmSetWindowAttribute(IntPtr hwnd,int attribute,ref int value,int size);
+    internal static void Apply(Window w,bool dark,int density){
+        var hwnd=new WindowInteropHelper(w).Handle;if(hwnd==IntPtr.Zero)return;
+        var source=HwndSource.FromHwnd(hwnd);if(source!=null)source.CompositionTarget.BackgroundColor=Colors.Transparent;
+        var margins=new Margins{L=-1,R=-1,T=-1,B=-1};DwmExtendFrameIntoClientArea(hwnd,ref margins);
+        int dk=1;DwmSetWindowAttribute(hwnd,20,ref dk,4);
+        var a=new Accent{State=4,Flags=2,Color=((uint)(density*255/100)<<24)|(dark?0x0028211cu:0x00f4eee8u)};
+        var p=Marshal.AllocHGlobal(Marshal.SizeOf(typeof(Accent)));
+        try{Marshal.StructureToPtr(a,p,false);var c=new Composition{Attribute=19,Data=p,Size=Marshal.SizeOf(typeof(Accent))};SetWindowCompositionAttribute(hwnd,ref c);}finally{Marshal.FreeHGlobal(p);}
+    }
+}
+internal static class SelfTest {
+    internal static int Run(string folder){
+        folder=Path.GetFullPath(folder);Directory.CreateDirectory(folder);Files.Root=folder;
+        var lines=new System.Collections.Generic.List<string>();
+        using(var current=System.Diagnostics.Process.GetCurrentProcess()){
+            string exe=ProcessDiscovery.ImagePath(current.Id);
+            Check(Array.IndexOf(ProcessDiscovery.Named(Path.GetFileName(exe)),current.Id)>=0,"native process enumeration finds current executable",lines);
+            Check(String.Equals(ProcessDiscovery.ImagePath(current.Id),exe,StringComparison.OrdinalIgnoreCase),"native process image path matches executable",lines);
+            Check(ProcessDiscovery.HasModule(current.Id,exe),"native module inspection finds current executable",lines);
+            Check(!ProcessDiscovery.HasModule(current.Id,Path.Combine(folder,"absent-module.dll")),"missing module is not reported loaded",lines);
+        }
+        var s=new GlassSettings{Density=72,Dark=true,Accent="#65B5A1"};s.Save();var loaded=GlassSettings.Load();
+        Check(loaded.Density==72&&loaded.Dark&&loaded.Accent==s.Accent,"settings round trip",lines);
+        string dir=Config.Prepare(s,true),text=File.ReadAllText(Path.Combine(dir,"runtime.ini"));
+        Check(text.Contains("[glass]")&&text.Contains("density=72")&&text.Contains("wall=\r\n"),"glass-only configuration, no wallpaper",lines);
+        Check(File.ReadAllBytes(Path.Combine(dir,"runtime.ini"))[0]==0xff,"UTF-16 native configuration",lines);
+        Check(File.ReadAllBytes(Path.Combine(dir,"routes.bin")).Length==12,"empty SVG routes protocol",lines);
+        Check(Config.Build(s,false).Contains("enabled=0"),"disabled configuration",lines);
+        Files.Atomic(Path.Combine(folder,"atomic.txt"),"old",Encoding.UTF8);Files.Atomic(Path.Combine(folder,"atomic.txt"),"new",Encoding.UTF8);
+        Check(File.ReadAllText(Path.Combine(folder,"atomic.txt"))=="new","atomic replacement",lines);
+        bool rejected=false;try{Config.Build(new GlassSettings{Density=999},true);}catch(InvalidDataException){rejected=true;}Check(rejected,"invalid concentration rejected",lines);
+        string foreign=Path.Combine(folder,"foreign.dll");File.WriteAllText(foreign,"not an engine");rejected=false;try{Engine.ValidateRuntime(foreign);}catch(IOException){rejected=true;}Check(rejected,"unknown runtime rejected",lines);
+        string original=Path.Combine(folder,"测试 背景.png");
+        using(var sample=new System.Drawing.Bitmap(96,64)){
+            using(var g=System.Drawing.Graphics.FromImage(sample)){g.Clear(System.Drawing.Color.FromArgb(30,90,170));g.FillRectangle(System.Drawing.Brushes.Orange,0,0,48,64);}
+            sample.Save(original,System.Drawing.Imaging.ImageFormat.Png);
+        }
+        string imported=Wallpaper.Import(original);Check(imported!=original&&File.Exists(imported),"Unicode source copied to managed PNG",lines);
+        s.Wallpaper=imported;s.WallpaperName="测试 背景.png";s.Blur=0;s.Shade=0;s.Save();loaded=GlassSettings.Load();
+        Check(loaded.Wallpaper==imported&&loaded.WallpaperName==s.WallpaperName&&loaded.Blur==0&&loaded.Shade==0,"wallpaper settings survive restart",lines);
+        string clean=Wallpaper.Process(s);s.Blur=20;string blurred=Wallpaper.Process(s);
+        using(var a=new System.Drawing.Bitmap(clean))using(var b=new System.Drawing.Bitmap(blurred)){
+            Check(a.Width==96&&a.Height==64,"image dimensions preserved",lines);
+            Check(a.GetPixel(46,32).ToArgb()!=b.GetPixel(46,32).ToArgb(),"blur changes real image edge pixels",lines);
+        }
+        s.Blur=0;s.SetCrop(new Rect(.5,0,.5,1));string half=Wallpaper.Process(s);
+        using(var crop=new System.Drawing.Bitmap(half)){Check(crop.Width==48&&crop.Height==64,"crop changes actual exported dimensions",lines);Check(crop.GetPixel(10,10).B>crop.GetPixel(10,10).R,"crop selects right half pixels",lines);}
+        s.Save();Check(GlassSettings.Load().Crop==s.Crop,"crop survives settings reload",lines);
+        Check(CropMath.Clamp(new Rect(.9,.9,.5,.5))==new Rect(.5,.5,.5,.5),"dragging crop stays inside image",lines);
+        Rect zoomed=CropMath.Zoom(new Rect(.2,.2,.5,.5),.5);Check(Math.Abs(zoomed.X-.325)<.0001&&Math.Abs(zoomed.Width-.25)<.0001,"zoom keeps crop center",lines);
+        Rect fitted=CropMath.Fit(16d/9,1.5,new Rect(0,0,1,1));Check(Math.Abs(fitted.Width*1.5/fitted.Height-16d/9)<.0001,"crop aspect ratio uses image coordinates",lines);
+        Check(Math.Abs(Readability.Contrast(System.Drawing.Color.Black,System.Drawing.Color.White)-21)<.00001,"WCAG black-white contrast equals 21:1",lines);
+        Check(Readability.Contrast(System.Drawing.Color.Gray,System.Drawing.Color.Gray)==1,"same colors fail contrast",lines);
+        var contrast=Readability.Analyze(s);Check(!contrast.Pass&&contrast.RecommendedShade>=0,"low contrast background gets concrete mask recommendation",lines);
+        s.Shade=contrast.RecommendedShade;Check(Readability.Analyze(s).Pass,"recommended mask passes background and bubble samples",lines);
+        var previous=s.Colors.Copy();s.Colors.Set(s.Dark,"incoming",s.Colors.Get(s,"chat"));
+        contrast=Readability.Analyze(s);Check(!contrast.Pass&&contrast.RecommendedShade<0,"same-color message bubble fails and cannot be repaired with wallpaper mask",lines);s.Colors=previous;
+        s.Colors.Set(false,"outgoing","#123456");s.Colors.Set(true,"outgoing","#AABBCC");s.Colors.Set(false,"incoming","#FFEEDD");s.Colors.Set(false,"input","#112233");s.Colors.SetOpacity(false,"input",40);s.Save();loaded=GlassSettings.Load();
+        loaded.Dark=false;Check(loaded.Colors.Get(loaded,"outgoing")=="#123456"&&loaded.Colors.Opacity(false,"input")==40,"custom palette and region opacity survive restart",lines);
+        loaded.Dark=true;Check(loaded.Colors.Get(loaded,"outgoing")=="#AABBCC","dark and light palette remain independent",lines);
+        var copied=loaded.Colors.Copy();copied.Set(true,"outgoing","#000000");Check(loaded.Colors.Get(loaded,"outgoing")=="#AABBCC","cancelled palette draft cannot change saved colors",lines);
+        loaded.Dark=false;using(var mask=new System.Drawing.Bitmap(ThemeColors.Mask(loaded,"input"))){var pixel=mask.GetPixel(3,3);Check(pixel.A==102&&pixel.R==17&&pixel.G==34&&pixel.B==51,"region mask preserves chosen RGB and 40 percent alpha",lines);}
+        string custom=Config.Build(loaded,true,clean);Check(custom.Contains("color12=#123456")&&custom.Contains("color14=#FFEEDD")&&custom.Contains("mask2="+ThemeColors.Mask(loaded,"input")),"separate bubbles and input layer exported to native engine",lines);
+        copied.Reset(true,"outgoing");Check(!copied.Customized(true,"outgoing")&&copied.Customized(false,"outgoing"),"reset only affects selected appearance",lines);
+        bool badColor=false;try{s.Colors.Set(false,"text","#GGGGGG");}catch(InvalidDataException){badColor=true;}Check(badColor,"invalid HEX color rejected",lines);s.Colors=new ThemeColors();
+        s.SetCrop(new Rect(0,0,1,1));
+        s.Blur=0;s.Shade=50;s.Dark=true;string dim=Wallpaper.Process(s);s.Dark=false;string light=Wallpaper.Process(s);
+        using(var a=new System.Drawing.Bitmap(dim))using(var b=new System.Drawing.Bitmap(light))Check(a.GetPixel(10,10).R<b.GetPixel(10,10).R,"dark/light masks change brightness",lines);
+        string wallpaperDir=Config.Prepare(s,true);var ini=File.ReadAllText(Path.Combine(wallpaperDir,"runtime.ini"));
+        Check(ini.Contains("wall="+light)&&ini.Contains("[glass]\r\nenabled=0"),"wallpaper mode emits image path and disables system glass",lines);
+        s.Wallpaper=Path.Combine(folder,"missing.png");rejected=false;try{Config.Prepare(s,true);}catch(IOException){rejected=true;}Check(rejected,"missing wallpaper is not silently dropped",lines);
+        Config.Prepare(s,false);lines.Add("PASS: recovery works even if wallpaper is missing");
+        s.Wallpaper="";Check(Config.Build(s,true).Contains("[glass]\r\nenabled=1"),"clear wallpaper switches back to system glass",lines);
+        var target=Weixin.Locate(null);lines.Add("Installed target: "+target.Version+" / hash compatible="+target.Compatible);
+        var w=Controller.LoadWindow();var content=(FrameworkElement)w.Content;content.Resources=w.Resources;content.SetValue(TextElement.ForegroundProperty,w.Foreground);content.SetValue(TextElement.FontFamilyProperty,w.FontFamily);var demo=new PalettePreview();demo.Update(loaded,null);((Border)w.FindName("Preview")).Child=demo;w.Content=null;content.Measure(new Size(1170,810));content.Arrange(new Rect(0,0,1170,810));content.UpdateLayout();
+        var image=new RenderTargetBitmap(1170,810,96,96,PixelFormats.Pbgra32);image.Render(content);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(image));using(var f=File.Create(Path.Combine(folder,"controller-preview.png")))encoder.Save(f);
+        lines.Add("PASS: XAML loaded and rendered. DWM and Weixin rendering require live validation.");
+        var editor=new ColorsWindow(null,loaded,null);var editorContent=(FrameworkElement)editor.Content;editorContent.SetValue(TextElement.ForegroundProperty,editor.Foreground);editorContent.SetValue(TextElement.FontFamilyProperty,editor.FontFamily);editor.Content=null;editorContent.Measure(new Size(1000,690));editorContent.Arrange(new Rect(0,0,1000,690));editorContent.UpdateLayout();var editorImage=new RenderTargetBitmap(1000,690,96,96,PixelFormats.Pbgra32);editorImage.Render(editorContent);var editorEncoder=new PngBitmapEncoder();editorEncoder.Frames.Add(BitmapFrame.Create(editorImage));using(var f=File.Create(Path.Combine(folder,"colors-editor.png")))editorEncoder.Save(f);lines.Add("PASS: color editor and interactive palette preview rendered");
+        lines.Add("No Weixin process launched, stopped or modified by these tests.");File.WriteAllLines(Path.Combine(folder,"results.txt"),lines,Encoding.UTF8);return 0;
+    }
+    static void Check(bool value,string label,System.Collections.Generic.List<string> lines){if(!value)throw new Exception("FAIL: "+label);lines.Add("PASS: "+label);}
+}

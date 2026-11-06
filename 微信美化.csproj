@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>微信美化</AssemblyName>
+    <Product>微信美化</Product>
+    <Title>微信美化</Title>
+    <Version>0.4.0</Version>
+    <!-- WPF owns DPI behavior; WinForms is used only for ColorDialog. -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="src/*.cs" />
+    <Compile Include="research/build/RuntimeIdentity.cs" />
+    <EmbeddedResource Include="src/MainWindow.xaml" LogicalName="MainWindow.xaml" />
+  </ItemGroup>
+</Project>

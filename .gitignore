@@ -1,0 +1,25 @@
+dist/
+research/
+obj/
+bin/
+*.zip
+
+# Local settings, media, diagnostics and generated binaries.
+data/
+self-test*/
+*.log
+*.user
+*.suo
+.vs/
+.idea/
+.env
+.env.*
+*.exe
+*.dll
+*.pdb
+*.obj
+*.lib
+*.exp
+*.lnk
+diagnose.txt
+self-test-error.txt
